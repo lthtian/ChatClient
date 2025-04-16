@@ -1,0 +1,15 @@
+<RCC>
+    <qresource prefix="/image">
+        <file>addfriend.svg</file>
+        <file>addgroup.svg</file>
+        <file>creategroup.svg</file>
+        <file>exit.svg</file>
+        <file>chat.png</file>
+        <file>close.png</file>
+        <file>Customer Copy.png</file>
+        <file>CustomerService.png</file>
+        <file>loading4.gif</file>
+        <file>groupchat.png</file>
+        <file>otochat.png</file>
+    </qresource>
+</RCC>
