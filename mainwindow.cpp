@@ -524,8 +524,23 @@ void MainWindow::recvHandler()
     // 历史记录处理 ========================================== //
     case HistoryMsgAck:
         if (jsonObj.contains("history") && jsonObj["history"].isArray()) {
-            QJsonArray historyArray = jsonObj["history"].toArray();
+            // 检查响应是否属于当前选中的聊天（异步响应可能乱序到达）
             bool isgroup = jsonObj["isgroup"].toBool();
+            bool isCurrentChat = false;
+            if (contactList->currentItem()) {
+                QString currentChat = contactList->currentItem()->text();
+                if (!currentChat.isEmpty() && _list.count(currentChat)) {
+                    auto& info = _list[currentChat];
+                    if (!isgroup && !info.second && jsonObj.contains("id1") && jsonObj.contains("id2")) {
+                        isCurrentChat = (jsonObj["id1"].toInt() == userid && jsonObj["id2"].toInt() == info.first);
+                    } else if (isgroup && info.second && jsonObj.contains("groupid")) {
+                        isCurrentChat = (jsonObj["groupid"].toInt() == info.first);
+                    }
+                }
+            }
+            if (!isCurrentChat) break;  // 不是当前聊天的响应，忽略
+
+            QJsonArray historyArray = jsonObj["history"].toArray();
             // 遍历历史记录
             QDateTime currentDateTime = QDateTime::currentDateTime();
             node today{currentDateTime.date().year(), currentDateTime.date().month(), currentDateTime.date().day()};
