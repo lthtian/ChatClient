@@ -367,9 +367,10 @@ int MainWindow::getUserId()
 // 根据返回的msgid, 触发不同的回复响应代码
 void MainWindow::recvHandler()
 {
+    // 循环处理所有已缓冲的完整 JSON 帧，避免粘包导致消息延迟
+    while (true) {
     QByteArray responseData = tcpclient->read();  // 读取返回的数据
-
-    // qDebug() << "Received data:" << responseData;
+    if (responseData.isEmpty()) break;  // 没有完整帧了，退出循环
 
     QJsonDocument jsonDoc = QJsonDocument::fromJson(responseData);  // 解析 JSON 数据
 
@@ -378,7 +379,7 @@ void MainWindow::recvHandler()
     else
     {
         qDebug() << "返回数据不是有效的 JSON 格式！";
-        return;
+        continue;
     }
 
     int msgid = jsonObj["msgid"].toInt();
@@ -523,22 +524,45 @@ void MainWindow::recvHandler()
         break;
     // 历史记录处理 ========================================== //
     case HistoryMsgAck:
+        qDebug() << "[DEBUG] HistoryMsgAck received, contains history:" << jsonObj.contains("history");
         if (jsonObj.contains("history") && jsonObj["history"].isArray()) {
             // 检查响应是否属于当前选中的聊天（异步响应可能乱序到达）
             bool isgroup = jsonObj["isgroup"].toBool();
             bool isCurrentChat = false;
+            QString currentChat;
             if (contactList->currentItem()) {
-                QString currentChat = contactList->currentItem()->text();
+                currentChat = contactList->currentItem()->text();
                 if (!currentChat.isEmpty() && _list.count(currentChat)) {
                     auto& info = _list[currentChat];
+                    qDebug() << "[DEBUG] Matching: userid=" << userid
+                             << "currentChat=" << currentChat
+                             << "info.first=" << info.first << "info.second=" << info.second
+                             << "isgroup=" << isgroup;
                     if (!isgroup && !info.second && jsonObj.contains("id1") && jsonObj.contains("id2")) {
-                        isCurrentChat = (jsonObj["id1"].toInt() == userid && jsonObj["id2"].toInt() == info.first);
+                        int rId1 = jsonObj["id1"].toInt();
+                        int rId2 = jsonObj["id2"].toInt();
+                        isCurrentChat = (rId1 == userid && rId2 == info.first);
+                        qDebug() << "[DEBUG] oto match: rId1=" << rId1 << "rId2=" << rId2
+                                 << "check1=" << (rId1 == userid) << "check2=" << (rId2 == info.first)
+                                 << "result=" << isCurrentChat;
                     } else if (isgroup && info.second && jsonObj.contains("groupid")) {
-                        isCurrentChat = (jsonObj["groupid"].toInt() == info.first);
+                        int rGid = jsonObj["groupid"].toInt();
+                        isCurrentChat = (rGid == info.first);
+                        qDebug() << "[DEBUG] group match: rGid=" << rGid << "info.first=" << info.first
+                                 << "result=" << isCurrentChat;
                     }
+                } else {
+                    qDebug() << "[DEBUG] currentChat empty or not in _list. currentChat=" << currentChat
+                             << "_list.count=" << _list.count(currentChat);
                 }
+            } else {
+                qDebug() << "[DEBUG] contactList has no currentItem!";
             }
-            if (!isCurrentChat) break;  // 不是当前聊天的响应，忽略
+            if (!isCurrentChat) {
+                qDebug() << "[DEBUG] HistoryMsgAck REJECTED!";
+                break;
+            }
+            qDebug() << "[DEBUG] HistoryMsgAck ACCEPTED, rendering history...";
 
             QJsonArray historyArray = jsonObj["history"].toArray();
             // 遍历历史记录
@@ -672,7 +696,7 @@ void MainWindow::recvHandler()
     default:
         break;
     }
-
+    } // end while
 }
 
 void MainWindow::reloadAvatar()
