@@ -1,0 +1,36 @@
+# Qt 构建产物
+build*/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# qmake 生成文件
+Makefile*
+*.Debug
+*.Release
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+object_script.*
+
+# Qt Creator
+*.pro.user
+*.pro.user.*
+*.autosave
+.qmake.stash
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
