@@ -7,7 +7,9 @@
 #include <QLabel>
 #include <QDebug>
 
-QNChatMessage::QNChatMessage(QWidget *parent, QPixmap* avatar) : QWidget(parent), m_customAvatar(avatar)
+QNChatMessage::QNChatMessage(QWidget *parent, QPixmap* avatar) : QWidget(parent)
+{
+    if (avatar) m_customAvatar = *avatar;
 {
     QFont te_font = this->font();
     te_font.setFamily("MicrosoftYaHei");
@@ -39,7 +41,7 @@ QNChatMessage::QNChatMessage(QWidget *parent, QPixmap* avatar) : QWidget(parent)
 
 void QNChatMessage::setAvatar(QPixmap* avatar)
 {
-    m_customAvatar = avatar;
+    if (avatar) m_customAvatar = *avatar;
     update(); // 更新界面以显示新头像
 }
 
@@ -201,8 +203,8 @@ void QNChatMessage::paintEvent(QPaintEvent *event)
 
     if (m_userType == User_Type::User_She) { // 用户
         // 头像 - 使用自定义头像或默认头像
-        if (m_customAvatar && !m_customAvatar->isNull()) {
-            painter.drawPixmap(m_iconLeftRect, *m_customAvatar);
+        if (!m_customAvatar.isNull()) {
+            painter.drawPixmap(m_iconLeftRect, m_customAvatar);
         } else {
             painter.drawPixmap(m_iconLeftRect, m_leftPixmap);
         }
@@ -281,8 +283,8 @@ void QNChatMessage::paintEvent(QPaintEvent *event)
         painter.drawText(m_textLeftRect, m_msg, option);
     } else if (m_userType == User_Type::User_Me) { // 自己
         // 头像 - 使用自定义头像或默认头像
-        if (m_customAvatar && !m_customAvatar->isNull()) {
-            painter.drawPixmap(m_iconRightRect, *m_customAvatar);
+        if (!m_customAvatar.isNull()) {
+            painter.drawPixmap(m_iconRightRect, m_customAvatar);
         } else {
             painter.drawPixmap(m_iconRightRect, m_rightPixmap);
         }

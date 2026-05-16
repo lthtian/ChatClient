@@ -1,12 +1,10 @@
 #include "tcpclient.h"
-#include <QMessageBox>
 #include <QJsonDocument>
 #include <QJsonObject>
 
 MyTcpClient::MyTcpClient()
+    : socket(nullptr)
 {
-    connect();
-    m_buffer.clear();
 }
 
 MyTcpClient::~MyTcpClient()
@@ -19,19 +17,21 @@ QTcpSocket *MyTcpClient::getSocket()
     return socket;
 }
 
-void MyTcpClient::connect()
+void MyTcpClient::connectToHost(const QString &host, uint16_t port)
 {
-    // 建立Tcp连接
-    socket = new QTcpSocket();
-    socket->connectToHost("82.156.254.74", 8000);
-    bool ret = socket->waitForConnected();
-    if(!ret)
-    {
-        qDebug() << "连接失败";
-        QMessageBox::warning(nullptr, "连接失败", "无法连接到服务器，请检查网络连接！");
-        exit(0);
+    if (socket) {
+        socket->close();
+        delete socket;
     }
-    else qDebug() << "连接成功";
+
+    // 建立Tcp连接（异步，不阻塞UI）
+    socket = new QTcpSocket(this);
+    connect(socket, &QTcpSocket::connected, this, &MyTcpClient::connected);
+    connect(socket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
+            this, [this](QAbstractSocket::SocketError) {
+        emit connectionFailed(socket->errorString());
+    });
+    socket->connectToHost(host, port);
 }
 
 void MyTcpClient::send(QByteArray jsonData)
@@ -40,8 +40,6 @@ void MyTcpClient::send(QByteArray jsonData)
     if (socket && socket->state() == QAbstractSocket::ConnectedState) {
         socket->write(jsonData);  // 发送数据
         socket->flush();          // 确保数据被立即发送
-    } else {
-        QMessageBox::warning(nullptr, "连接失败", "无法连接到服务器！");
     }
 }
 
@@ -49,44 +47,45 @@ QByteArray MyTcpClient::read() {
     // 读取所有可用数据并添加到缓冲区
     m_buffer.append(socket->readAll());
 
-    // 尝试找到一个完整的JSON对象
+    // 尝试找到一个完整的JSON对象（带字符串感知的花括号匹配）
     int braceCount = 0;
     int startPos = -1;
+    bool in_string = false;
 
-    // 找到第一个 '{'
     for (int i = 0; i < m_buffer.size(); i++) {
-        if (m_buffer[i] == '{') {
-            startPos = i;
-            break;
+        char c = m_buffer[i];
+
+        if (c == '"') {
+            int backslashCount = 0;
+            int j = i;
+            while (j > 0 && m_buffer[j - 1] == '\\') {
+                backslashCount++;
+                j--;
+            }
+            if (backslashCount % 2 == 0) {
+                in_string = !in_string;
+            }
         }
-    }
 
-    if (startPos == -1) {
-        // 没有找到开始的 '{'，清空缓冲区
-        if (m_buffer.size() > 1024) {
-            m_buffer.clear();
-        }
-        return QByteArray();
-    }
+        if (!in_string) {
+            if (c == '{') {
+                if (startPos == -1) startPos = i;
+                braceCount++;
+            } else if (c == '}') {
+                braceCount--;
+                if (braceCount == 0 && startPos != -1) {
+                    // 找到了一个完整的JSON对象
+                    QByteArray jsonData = m_buffer.mid(startPos, i - startPos + 1);
 
-    // 从startPos开始，计算括号匹配
-    for (int i = startPos; i < m_buffer.size(); i++) {
-        if (m_buffer[i] == '{') {
-            braceCount++;
-        } else if (m_buffer[i] == '}') {
-            braceCount--;
-            if (braceCount == 0) {
-                // 找到了一个完整的JSON对象
-                QByteArray jsonData = m_buffer.mid(startPos, i - startPos + 1);
+                    // 验证是否为有效的JSON
+                    QJsonParseError error;
+                    QJsonDocument doc = QJsonDocument::fromJson(jsonData, &error);
 
-                // 验证是否为有效的JSON
-                QJsonParseError error;
-                QJsonDocument doc = QJsonDocument::fromJson(jsonData, &error);
-
-                if (error.error == QJsonParseError::NoError) {
-                    // 从缓冲区中移除已处理的数据
-                    m_buffer.remove(0, i + 1);
-                    return jsonData;
+                    if (error.error == QJsonParseError::NoError) {
+                        // 从缓冲区中移除已处理的数据
+                        m_buffer.remove(0, i + 1);
+                        return jsonData;
+                    }
                 }
             }
         }

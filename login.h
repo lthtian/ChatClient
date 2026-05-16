@@ -46,6 +46,8 @@ private:
     QVBoxLayout *mainLayout;
 
     MyTcpClient* tcpclient;
+
+    void setControlsEnabled(bool enabled);
 };
 
 #endif // LOGIN_H

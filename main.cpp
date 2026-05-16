@@ -14,6 +14,9 @@ int main(int argc, char *argv[])
     // 使聊天窗口可以接收登录界面取得的id
     QObject::connect(loginWindow, &LoginWindow::loginSuccess, &chatWindow, &MainWindow::setUser);
 
+    // 异步连接服务器
+    tcpclient->connectToHost("82.156.254.74", 8000);
+
     if (loginWindow->exec() == QDialog::Accepted) {
         loginWindow->close();  // 关闭登录窗口
         delete loginWindow;    // 释放登录窗口的内存

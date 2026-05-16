@@ -72,7 +72,7 @@ private:
     QPushButton* exitButton;
     QPushButton* createGroup;
 
-    QPixmap* avatar; // 记录用户的头像
+    QPixmap avatar; // 记录用户的头像
 
     // 添加好友/添加群组/创建群组界面配置
     QDialog* addFriendDialog;
@@ -104,7 +104,7 @@ public:
     bool isMenuVisible = false;
 public:
     unordered_map<QString, std::pair<int, bool>> _list;  // 好友/群组列表  <名称, id, 是否群组>
-    unordered_map<QString, QPixmap*> _avatars;           // 名称到头像
+    unordered_map<QString, QPixmap> _avatars;            // 名称到头像
     unordered_map<QString, QListWidgetItem*> mp;         // 名称到表项的映射
 };
 

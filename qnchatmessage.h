@@ -69,7 +69,7 @@ private:
     QRect m_textRightRect;
     QPixmap m_leftPixmap;
     QPixmap m_rightPixmap;
-    QPixmap* m_customAvatar = nullptr; // 新增：自定义头像指针
+    QPixmap m_customAvatar; // 自定义头像（值语义，利用 COW）
     QLabel* m_loading = Q_NULLPTR;
     QMovie* m_loadingMovie = Q_NULLPTR;
     bool m_isSending = false;

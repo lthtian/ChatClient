@@ -30,7 +30,6 @@ MainWindow::MainWindow(QWidget *parent, MyTcpClient* tc)
     this->setWindowIcon(QIcon(":/image/chat.png"));  // 移除图标
     setupUI();
     applyStyles();  // 应用样式
-    avatar = new QPixmap();
 }
 
 MainWindow::~MainWindow()
@@ -162,8 +161,10 @@ void MainWindow::setupUI()
     connect(addFriend, &QPushButton::clicked, this, &MainWindow::onAddFriendClicked);
     connect(addGroup, &QPushButton::clicked, this, &MainWindow::onAddGroupClicked);
     connect(createGroup, &QPushButton::clicked, this, &MainWindow::onCreateGroupClicked);
-    // 网络部分
-    connect(tcpclient->getSocket(), &QTcpSocket::readyRead, this, &MainWindow::recvHandler);
+    // 网络部分（连接成功后绑定 readyRead）
+    connect(tcpclient, &MyTcpClient::connected, this, [this]() {
+        connect(tcpclient->getSocket(), &QTcpSocket::readyRead, this, &MainWindow::recvHandler);
+    });
     // 连接 MyListWidget 的信号
     connect(contactList, &MyListWidget::menuHidden, this, [this]() {
         isMenuVisible = false; // 更新标志位
@@ -476,7 +477,7 @@ void MainWindow::recvHandler()
         }
 
         // 创建消息控件
-        QNChatMessage* messageWidget = new QNChatMessage(messageList, _avatars[sendername]);
+        QNChatMessage* messageWidget = new QNChatMessage(messageList, &_avatars[sendername]);
         QString time = QString::number(QDateTime::currentDateTime().toTime_t());
         QSize size = messageWidget->fontRect(message);
 
@@ -604,14 +605,14 @@ void MainWindow::recvHandler()
                         QNChatMessage::User_Type userType;
                         if(id != userid)
                         {
-                            if(_avatars[name] == nullptr)
+                            if(_avatars[name].isNull())
                             {
                                 _list[name] = {id, false};
                                 getImage(name);
                             }
-                            userType = QNChatMessage::User_She, messageWidget = new QNChatMessage(messageList, _avatars[name]);
+                            userType = QNChatMessage::User_She, messageWidget = new QNChatMessage(messageList, &_avatars[name]);
                         }
-                        else userType = QNChatMessage::User_Me, messageWidget = new QNChatMessage(messageList, avatar);
+                        else userType = QNChatMessage::User_Me, messageWidget = new QNChatMessage(messageList, &avatar);
 
                         QString time = QString::number(QDateTime::currentDateTime().toTime_t());
                         QSize size = messageWidget->fontRect(message);
@@ -683,11 +684,10 @@ void MainWindow::recvHandler()
             QString name = jsonObj["username"].toString();
 
             // 转换为QPixmap
-            if(name == username) avatar->loadFromData(imageData);
+            if(name == username) avatar.loadFromData(imageData);
             else
             {
-                if(_avatars[name] == nullptr) _avatars[name] = new QPixmap();
-                _avatars[name]->loadFromData(imageData);
+                _avatars[name].loadFromData(imageData);
                 // 如果当前list不为空, 更新一遍头像
                 if(messageList->count() != 0) reloadAvatar();
             }
@@ -712,7 +712,7 @@ void MainWindow::reloadAvatar()
         // 尝试转换为 QNChatMessage
         QNChatMessage *chatMessage = qobject_cast<QNChatMessage*>(widget);
         if (!chatMessage) continue;  // 确保转换成功
-        if(chatMessage->userType() != QNChatMessage::User_Me) chatMessage->setAvatar(_avatars[chatMessage->name()]);
+        if(chatMessage->userType() != QNChatMessage::User_Me) chatMessage->setAvatar(&_avatars[chatMessage->name()]);
     }
 }
 
@@ -783,7 +783,7 @@ void MainWindow::sendMessage()
     // -----------------------------------------------------------------//
     // 向别人发送消息的同时也更新自己的对话框界面
     // 创建消息控件
-    QNChatMessage* messageWidget = new QNChatMessage(messageList, avatar);
+    QNChatMessage* messageWidget = new QNChatMessage(messageList, &avatar);
     QString time = QString::number(QDateTime::currentDateTime().toTime_t());
     QSize size = messageWidget->fontRect(message); // 计算气泡尺寸
 

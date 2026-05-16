@@ -21,9 +21,6 @@ LoginWindow::LoginWindow(QWidget *parent, MyTcpClient* tc)
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     setFixedSize(400, 300);  // 调整窗口大小
 
-    // Tcp响应机制
-    connect(tcpclient->getSocket(), &QTcpSocket::readyRead, this, &LoginWindow::login);
-
     // 创建控件
     label = new QLabel(this);
     label->setText("登录");
@@ -165,6 +162,29 @@ LoginWindow::LoginWindow(QWidget *parent, MyTcpClient* tc)
     usernameInput->installEventFilter(this);
     passwordInput->installEventFilter(this);
     loginButton->installEventFilter(this);
+
+    // Tcp响应机制（连接成功后 socket 才存在，在 connected 信号中绑定 readyRead）
+    connect(tcpclient, &MyTcpClient::connected, this, [this]() {
+        connect(tcpclient->getSocket(), &QTcpSocket::readyRead, this, &LoginWindow::login);
+    });
+
+    // 监听连接状态
+    connect(tcpclient, &MyTcpClient::connected, this, [this]() {
+        label->setText("登录");
+        setControlsEnabled(true);
+    });
+    connect(tcpclient, &MyTcpClient::connectionFailed, this, [this](QString error) {
+        label->setText("连接失败: " + error);
+        setControlsEnabled(false);
+    });
+
+    // 如果已经连接（socket 已存在且处于连接状态）
+    if (tcpclient->getSocket() && tcpclient->getSocket()->state() == QAbstractSocket::ConnectedState) {
+        connect(tcpclient->getSocket(), &QTcpSocket::readyRead, this, &LoginWindow::login);
+    } else {
+        label->setText("正在连接服务器...");
+        setControlsEnabled(false);
+    }
 }
 
 void LoginWindow::openAvatarSelector() {
@@ -372,8 +392,17 @@ void LoginWindow::change()
     update();
 }
 
+void LoginWindow::setControlsEnabled(bool enabled)
+{
+    usernameInput->setEnabled(enabled);
+    passwordInput->setEnabled(enabled);
+    loginButton->setEnabled(enabled);
+    changeReg->setEnabled(enabled);
+}
+
 void LoginWindow::login()
 {
+    if (!tcpclient->getSocket()) return;
     QByteArray responseData = tcpclient->read();  // 读取返回的数据
     QJsonDocument jsonDoc = QJsonDocument::fromJson(responseData);  // 解析 JSON 数据
 
