@@ -15,7 +15,7 @@ int main(int argc, char *argv[])
     QObject::connect(loginWindow, &LoginWindow::loginSuccess, &chatWindow, &MainWindow::setUser);
 
     // 异步连接服务器
-    tcpclient->connectToHost("82.156.254.74", 8000);
+    tcpclient->connectToHost("39.105.18.142", 7000);
 
     if (loginWindow->exec() == QDialog::Accepted) {
         loginWindow->close();  // 关闭登录窗口
