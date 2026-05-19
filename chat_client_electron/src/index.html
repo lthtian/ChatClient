@@ -20,8 +20,13 @@
   <!-- ========== 聊天界面 ========== -->
   <div id="chat-view" class="view" style="display: none;">
     <div class="sidebar">
-      <div class="sidebar-header">
-        <span id="user-info"></span>
+      <div class="sidebar-header"><span id="user-info"></span></div>
+      <div class="sidebar-toolbar">
+        <button class="toolbar-btn" id="btn-add-friend" title="添加好友">＋友</button>
+        <button class="toolbar-btn" id="btn-add-group" title="加入群组">＋群</button>
+        <button class="toolbar-btn" id="btn-create-group" title="创建群组">建群</button>
+        <div style="flex:1"></div>
+        <button class="toolbar-btn" id="btn-exit" title="退出">退出</button>
       </div>
       <ul id="contact-list"></ul>
     </div>
@@ -33,6 +38,24 @@
         <button id="send-btn">发送</button>
       </div>
     </div>
+  </div>
+
+  <!-- ========== 弹窗（添加好友/加入群组/创建群组）========== -->
+  <div id="dialog-overlay" style="display: none;">
+    <div class="dialog-card">
+      <div class="dialog-top">
+        <h3 id="dialog-title">添加好友</h3>
+        <button id="dialog-close" class="dialog-close-btn">×</button>
+      </div>
+      <div id="dialog-error" class="dialog-error"></div>
+      <input type="text" id="dialog-input" placeholder="">
+      <button id="dialog-confirm" class="dialog-confirm-btn">确定</button>
+    </div>
+  </div>
+
+  <!-- ========== 右键菜单 ========== -->
+  <div id="context-menu" style="display: none;">
+    <div class="ctx-item" id="ctx-remove">删除好友</div>
   </div>
 
   <script src="./tcp.js"></script>
