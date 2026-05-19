@@ -37,6 +37,7 @@ const state = {
   currentChat: null,
   dialogOP: -1,           // 1=加好友 2=加群 3=建群
   contextTarget: null,    // 右键菜单目标联系人
+  regAvatar: '',          // 注册时选择的头像 base64 数据
 };
 
 // ========== TCP 客户端 ==========
@@ -67,6 +68,56 @@ const dialogClose   = $('dialog-close');
 // 右键菜单
 const contextMenu = $('context-menu');
 const ctxRemove   = $('ctx-remove');
+// 注册头像
+const avatarSelector = $('avatar-selector');
+const avatarPreview  = $('avatar-preview');
+const avatarInput    = $('avatar-input');
+
+// ========== 图片压缩（注册头像）==========
+function compressImage(file, maxSize, quality) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let w = img.width, h = img.height;
+        if (w > maxSize || h > maxSize) {
+          if (w > h) { h = h * maxSize / w; w = maxSize; }
+          else { w = w * maxSize / h; h = maxSize; }
+        }
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        const base64 = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+        resolve(base64);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function resetAvatarSelector() {
+  state.regAvatar = '';
+  avatarPreview.classList.remove('has-image');
+  const prev = avatarPreview.querySelector('img');
+  if (prev) prev.remove();
+  avatarInput.value = '';
+}
+
+avatarPreview.addEventListener('click', () => avatarInput.click());
+avatarInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  state.regAvatar = await compressImage(file, 200, 0.85);
+  let img = avatarPreview.querySelector('img');
+  if (!img) {
+    img = document.createElement('img');
+    avatarPreview.insertBefore(img, avatarPreview.firstChild);
+  }
+  img.src = `data:image/jpeg;base64,${state.regAvatar}`;
+});
 
 // ========== 连接服务器 ==========
 async function init() {
@@ -99,8 +150,13 @@ async function handleLogin() {
   const msgId = state.isLoginMode ? MsgType.LoginMsg : MsgType.RegMsg;
   const ackId = state.isLoginMode ? MsgType.LoginMsgAck : MsgType.RegMsgAck;
 
+  const payload = { msgid: msgId, username, password };
+  if (!state.isLoginMode && state.regAvatar) {
+    payload.avatar = state.regAvatar;
+  }
+
   try {
-    const resp = await tcp.sendAndWait({ msgid: msgId, username, password }, ackId, 5000);
+    const resp = await tcp.sendAndWait(payload, ackId, 5000);
     if (resp.errno === 0) {
       if (state.isLoginMode) {
         state.userId = parseInt(resp.id);
@@ -112,6 +168,8 @@ async function handleLogin() {
         loginTitle.textContent = '注册成功，请登录';
         state.isLoginMode = true;
         switchMode.textContent = '没有账号? 去注册';
+        avatarSelector.style.display = 'none';
+        resetAvatarSelector();
       }
     } else {
       loginTitle.textContent = resp.errmsg || '操作失败';
@@ -530,6 +588,8 @@ switchMode.addEventListener('click', (e) => {
   state.isLoginMode = !state.isLoginMode;
   loginTitle.textContent = state.isLoginMode ? '登录' : '注册';
   switchMode.textContent = state.isLoginMode ? '没有账号? 去注册' : '已注册? 去登录';
+  avatarSelector.style.display = state.isLoginMode ? 'none' : 'flex';
+  if (!state.isLoginMode) resetAvatarSelector();
 });
 
 sendBtn.addEventListener('click', sendMessage);
