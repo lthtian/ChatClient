@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Chat Client</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- ========== 登录界面 ========== -->
+  <div id="login-view" class="view">
+    <div class="login-card">
+      <h2 id="login-title">正在连接服务器...</h2>
+      <input type="text" id="username" placeholder="请输入用户名" disabled>
+      <input type="password" id="password" placeholder="请输入密码" disabled>
+      <button id="login-btn" disabled>确认</button>
+      <a href="#" id="switch-mode">没有账号? 去注册</a>
+    </div>
+  </div>
+
+  <!-- ========== 聊天界面 ========== -->
+  <div id="chat-view" class="view" style="display: none;">
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <span id="user-info"></span>
+      </div>
+      <ul id="contact-list"></ul>
+    </div>
+    <div class="chat-main">
+      <div class="chat-header" id="chat-header">选择一个联系人开始聊天</div>
+      <div class="messages" id="messages"></div>
+      <div class="input-area">
+        <textarea id="msg-input" placeholder="输入消息..." rows="2"></textarea>
+        <button id="send-btn">发送</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./tcp.js"></script>
+  <script src="./renderer.js"></script>
+</body>
+</html>
