@@ -10,7 +10,6 @@
 QNChatMessage::QNChatMessage(QWidget *parent, QPixmap* avatar) : QWidget(parent)
 {
     if (avatar) m_customAvatar = *avatar;
-{
     QFont te_font = this->font();
     te_font.setFamily("MicrosoftYaHei");
     te_font.setPointSize(12);

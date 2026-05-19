@@ -272,11 +272,8 @@ void LoginWindow::handleLogin()
         }
     }
 
-    // 转换为 JSON 字符串
-    QJsonDocument jsonDoc(jsonObj);
-    QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-
-    tcpclient->send(jsonData);
+    // 发送 JSON 数据
+    tcpclient->sendJson(jsonObj);
 }
 
 // 在前端上传图片前进行压缩

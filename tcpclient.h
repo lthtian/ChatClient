@@ -2,7 +2,7 @@
 #define TCPCLIENT_H
 
 #include <QTcpSocket>
-
+#include <QJsonObject>
 
 class MyTcpClient : public QObject
 {
@@ -14,6 +14,7 @@ public:
     QTcpSocket* getSocket();
     void connectToHost(const QString &host, uint16_t port);
     void send(QByteArray jsonData);
+    void sendJson(const QJsonObject &jsonObj);
     QByteArray read();
     void close();
 

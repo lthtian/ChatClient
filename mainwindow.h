@@ -98,6 +98,16 @@ private:
     void reloadAvatar();
     void refreshMessageLayout();
 
+    // 消息处理方法（由 recvHandler 分发）
+    void handleInitMsgAck(const QJsonObject& jsonObj);
+    void handleChatMsg(int msgid, const QJsonObject& jsonObj);
+    void handleAddFriendAck(const QJsonObject& jsonObj);
+    void handleAddGroupAck(const QJsonObject& jsonObj);
+    void handleCreateGroupAck(const QJsonObject& jsonObj);
+    void handleHistoryMsgAck(const QJsonObject& jsonObj);
+    void handleNewMsgAck(const QJsonObject& jsonObj);
+    void handleImageReqAck(const QJsonObject& jsonObj);
+
 public:
     MyTcpClient* tcpclient;     // 网络模块
 

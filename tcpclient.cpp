@@ -43,6 +43,12 @@ void MyTcpClient::send(QByteArray jsonData)
     }
 }
 
+void MyTcpClient::sendJson(const QJsonObject &jsonObj)
+{
+    QJsonDocument jsonDoc(jsonObj);
+    send(jsonDoc.toJson());
+}
+
 QByteArray MyTcpClient::read() {
     // 读取所有可用数据并添加到缓冲区
     m_buffer.append(socket->readAll());
