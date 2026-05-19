@@ -38,7 +38,7 @@ MainWindow::~MainWindow()
 }
 
 
-// ========================================== // 
+// ========================================== //
 
 
 void MainWindow::setupUI()
@@ -230,56 +230,36 @@ void MainWindow::initDialog1()
 
     // 连接按钮槽函数
     connect(confirmButton, &QPushButton::clicked, [&]() {
-        // 向后端发送添加好友请求
         qDebug() << "已触发lambda";
         if(dialogOP == -1) return;
-        else if(dialogOP == 1)
+        QString name = addFriendInput->text();
+        if(name.isEmpty()) return;
+
+        if(dialogOP == 1)
         {
-            QString name = addFriendInput->text();
-            if(name.isEmpty()) return;
-            QJsonObject jsonObj;
-            jsonObj["id"] = userid;
-            jsonObj["friendname"] = name;
-            jsonObj["msgid"] = AddFriendMsg;  // 添加 msgid 属性
-
-            // 转换为 JSON 字符串
-            QJsonDocument jsonDoc(jsonObj);
-            QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-
-            // 通过 socket 发送 JSON 数据
-            tcpclient->send(jsonData);
+            tcpclient->sendJson(QJsonObject{
+                {"id", userid},
+                {"friendname", name},
+                {"msgid", AddFriendMsg}
+            });
         }
         else if(dialogOP == 2)
         {
-            QString name = addFriendInput->text();
-            if(name.isEmpty()) return;
-            QJsonObject jsonObj;
-            jsonObj["userid"] = userid;
-            jsonObj["groupname"] = name;
-            jsonObj["msgid"] = AddGroupMsg;  // 添加 msgid 属性
-            jsonObj["role"] = "normal";
-
-            // 转换为 JSON 字符串
-            QJsonDocument jsonDoc(jsonObj);
-            QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-            qDebug() << "已发送加入群聊申请: " + jsonData;
-            // 通过 socket 发送 JSON 数据
-            tcpclient->send(jsonData);
+            tcpclient->sendJson(QJsonObject{
+                {"userid", userid},
+                {"groupname", name},
+                {"msgid", AddGroupMsg},
+                {"role", QString("normal")}
+            });
+            qDebug() << "已发送加入群聊申请";
         }
         else if(dialogOP == 3)
         {
-            QString name = addFriendInput->text();
-            if(name.isEmpty()) return;
-            QJsonObject jsonObj;
-            jsonObj["userid"] = userid;
-            jsonObj["groupname"] = name;
-            jsonObj["msgid"] = CreateGroupMsg;  // 添加 msgid 属性
-
-            // 转换为 JSON 字符串
-            QJsonDocument jsonDoc(jsonObj);
-            QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-            // 通过 socket 发送 JSON 数据
-            tcpclient->send(jsonData);
+            tcpclient->sendJson(QJsonObject{
+                {"userid", userid},
+                {"groupname", name},
+                {"msgid", CreateGroupMsg}
+            });
         }
         addFriendInput->clear();
     });
@@ -370,333 +350,341 @@ void MainWindow::recvHandler()
 {
     // 循环处理所有已缓冲的完整 JSON 帧，避免粘包导致消息延迟
     while (true) {
-    QByteArray responseData = tcpclient->read();  // 读取返回的数据
-    if (responseData.isEmpty()) break;  // 没有完整帧了，退出循环
+        QByteArray responseData = tcpclient->read();  // 读取返回的数据
+        if (responseData.isEmpty()) break;  // 没有完整帧了，退出循环
 
-    QJsonDocument jsonDoc = QJsonDocument::fromJson(responseData);  // 解析 JSON 数据
+        QJsonDocument jsonDoc = QJsonDocument::fromJson(responseData);  // 解析 JSON 数据
+        if (!jsonDoc.isObject()) {
+            qDebug() << "返回数据不是有效的 JSON 格式！";
+            continue;
+        }
 
-    QJsonObject jsonObj;
-    if (jsonDoc.isObject()) jsonObj = jsonDoc.object();
+        QJsonObject jsonObj = jsonDoc.object();
+        int msgid = jsonObj["msgid"].toInt();
+        switch (msgid) {
+        case InitMsgAck:        handleInitMsgAck(jsonObj); break;
+        case OTOMsg:
+        case GroupChatMsg:      handleChatMsg(msgid, jsonObj); break;
+        case AddFriendMsgAck:   handleAddFriendAck(jsonObj); break;
+        case AddGroupMsgAck:    handleAddGroupAck(jsonObj); break;
+        case CreateGroupMsgAck: handleCreateGroupAck(jsonObj); break;
+        case HistoryMsgAck:     handleHistoryMsgAck(jsonObj); break;
+        case NewMsgAck:         handleNewMsgAck(jsonObj); break;
+        case imageReqAck:       handleImageReqAck(jsonObj); break;
+        default: break;
+        }
+    } // end while
+}
+
+// 初始化回复处理
+void MainWindow::handleInitMsgAck(const QJsonObject& jsonObj)
+{
+    // 初始化好友列表
+    if (jsonObj.contains("friends") && jsonObj["friends"].isArray()) {
+        QJsonArray friendsArray = jsonObj["friends"].toArray();
+
+        // 遍历 friends 数组
+        for (const QJsonValue &friendValue : friendsArray) {
+            if (friendValue.isString()) {
+                // 处理每个好友 JSON 字符串
+                QString friendJsonStr = friendValue.toString();
+                QJsonDocument friendDoc = QJsonDocument::fromJson(friendJsonStr.toUtf8());
+                if (friendDoc.isObject()) {
+                    QJsonObject friendObj = friendDoc.object();
+                    int id = friendObj["id"].toString().toInt();  // 这里以前有坑!!!
+                    QString name = friendObj["name"].toString();
+                    QString state = friendObj["state"].toString();
+                    // 存入当前好友列表中
+                    _list.insert({name, {id, false}});
+                    // 再向后端申请对应好友的头像
+                    getImage(name);
+                    // 更新前端界面
+                    addToContactList(name, false);
+                }
+            }
+        }
+    }
+    // 初始化群组列表
+    if (jsonObj.contains("groups") && jsonObj["groups"].isArray()) {
+        QJsonArray groupsArray = jsonObj["groups"].toArray();
+
+        // 遍历 groups 数组
+        for (const QJsonValue &groupValue : groupsArray) {
+            if (groupValue.isString()) {
+                // 解析 JSON 字符串
+                QString groupJsonStr = groupValue.toString();
+                QJsonDocument groupDoc = QJsonDocument::fromJson(groupJsonStr.toUtf8());
+                if (groupDoc.isObject()) {
+                    QJsonObject groupObj = groupDoc.object();
+                    int groupId = groupObj["id"].toString().toInt();  // 转换群组 ID
+                    QString groupName = groupObj["groupname"].toString();
+
+                    // 存入当前群组列表
+                    _list.insert({groupName, {groupId, true}});
+                    // 更新前端 UI（假设群组列表是 groupList）
+                    addToContactList(groupName, true);
+                }
+            }
+        }
+    }
+
+    contactList->clearSelection();
+    contactList->setCurrentItem(nullptr);
+}
+
+// 私聊/群聊消息处理
+void MainWindow::handleChatMsg(int msgid, const QJsonObject& jsonObj)
+{
+    // sendername
+    QString name, sendername;
+    if(msgid == OTOMsg) name = jsonObj["sender"].toString(), sendername = name;
+    else name = jsonObj["groupname"].toString(), sendername = jsonObj["sendername"].toString();
+    QString message = jsonObj["message"].toString();
+
+    // 只有当前选中的item是对应的才更新列表
+    if(!contactList->currentItem() || name != contactList->currentItem()->text())
+    {
+        // 到达这里之前肯定已经经历过查询了
+        // 说明当前消息未查看, 计数+1
+        contactList->setItemValue(mp[name], contactList->getItemValue(mp[name]) + 1);
+        int row = contactList->row(mp[name]);
+        QListWidgetItem* takenItem = contactList->takeItem(row); // 移除item
+        contactList->insertItem(0, takenItem); // 插入到顶部(第0行)
+
+        // 告知后端未读消息数+1
+        tcpclient->sendJson(QJsonObject{
+            {"userid", userid},
+            {"sender", _list[name].first},
+            {"isgroup", _list[name].second},
+            {"msgid", addNewMsgCnt}
+        });
+        return;
+    }
+
+    // 创建消息控件
+    QNChatMessage* messageWidget = new QNChatMessage(messageList, &_avatars[sendername]);
+    QString time = QString::number(QDateTime::currentDateTime().toTime_t());
+    QSize size = messageWidget->fontRect(message);
+
+    // 设置对方消息样式
+    QNChatMessage::User_Type userType = QNChatMessage::User_She;
+
+    if(msgid == OTOMsg) messageWidget->setText(message, time, size, userType, name, false);
+    else messageWidget->setText(message, time, size, userType, jsonObj["sendername"].toString(), true);
+
+    // 添加到列表
+    QListWidgetItem* item = new QListWidgetItem();
+    item->setSizeHint(size);
+    messageList->addItem(item);
+    messageList->setItemWidget(item, messageWidget);
+
+    // 接收到消息直接拉到最底
+    messageList->scrollToItem(messageList->item(messageList->count() - 1), QAbstractItemView::PositionAtBottom);
+}
+
+// 添加好友业务处理
+void MainWindow::handleAddFriendAck(const QJsonObject& jsonObj)
+{
+    if(jsonObj.contains("errmsg"))
+        addFriendLabel->setText(jsonObj["errmsg"].toString());
+    if(jsonObj["errno"].toInt() != 0) return;
+    // 更新聊天列表与map
+    addToContactList(jsonObj["friendname"].toString(), false);
+    _list.insert({jsonObj["friendname"].toString(), {jsonObj["friendid"].toInt(), false}});
+}
+
+// 加入群组业务处理
+void MainWindow::handleAddGroupAck(const QJsonObject& jsonObj)
+{
+    if(jsonObj.contains("errmsg"))
+        addFriendLabel->setText(jsonObj["errmsg"].toString());
+    if(jsonObj["errno"].toInt() != 0) return;
+    // 更新聊天列表与map
+    addToContactList(jsonObj["groupname"].toString(), true);
+    _list.insert({jsonObj["groupname"].toString(), {jsonObj["groupid"].toInt(), true}});
+}
+
+// 创建群聊业务处理
+void MainWindow::handleCreateGroupAck(const QJsonObject& jsonObj)
+{
+    if(jsonObj.contains("errmsg"))
+        addFriendLabel->setText(jsonObj["errmsg"].toString());
+    if(jsonObj["errno"].toInt() != 0) return;
+    // 更新聊天列表与map
+    addToContactList(jsonObj["groupname"].toString(), true);
+    _list.insert({jsonObj["groupname"].toString(), {jsonObj["groupid"].toInt(), true}});
+}
+
+// 历史记录处理
+void MainWindow::handleHistoryMsgAck(const QJsonObject& jsonObj)
+{
+    qDebug() << "[DEBUG] HistoryMsgAck received, contains history:" << jsonObj.contains("history");
+    if (!jsonObj.contains("history") || !jsonObj["history"].isArray()) return;
+
+    // 检查响应是否属于当前选中的聊天（异步响应可能乱序到达）
+    bool isgroup = jsonObj["isgroup"].toBool();
+    bool isCurrentChat = false;
+    QString currentChat;
+    if (contactList->currentItem()) {
+        currentChat = contactList->currentItem()->text();
+        if (!currentChat.isEmpty() && _list.count(currentChat)) {
+            auto& info = _list[currentChat];
+            qDebug() << "[DEBUG] Matching: userid=" << userid
+                     << "currentChat=" << currentChat
+                     << "info.first=" << info.first << "info.second=" << info.second
+                     << "isgroup=" << isgroup;
+            if (!isgroup && !info.second && jsonObj.contains("id1") && jsonObj.contains("id2")) {
+                int rId1 = jsonObj["id1"].toInt();
+                int rId2 = jsonObj["id2"].toInt();
+                isCurrentChat = (rId1 == userid && rId2 == info.first);
+                qDebug() << "[DEBUG] oto match: rId1=" << rId1 << "rId2=" << rId2
+                         << "check1=" << (rId1 == userid) << "check2=" << (rId2 == info.first)
+                         << "result=" << isCurrentChat;
+            } else if (isgroup && info.second && jsonObj.contains("groupid")) {
+                int rGid = jsonObj["groupid"].toInt();
+                isCurrentChat = (rGid == info.first);
+                qDebug() << "[DEBUG] group match: rGid=" << rGid << "info.first=" << info.first
+                         << "result=" << isCurrentChat;
+            }
+        } else {
+            qDebug() << "[DEBUG] currentChat empty or not in _list. currentChat=" << currentChat
+                     << "_list.count=" << _list.count(currentChat);
+        }
+    } else {
+        qDebug() << "[DEBUG] contactList has no currentItem!";
+    }
+    if (!isCurrentChat) {
+        qDebug() << "[DEBUG] HistoryMsgAck REJECTED!";
+        return;
+    }
+    qDebug() << "[DEBUG] HistoryMsgAck ACCEPTED, rendering history...";
+
+    QJsonArray historyArray = jsonObj["history"].toArray();
+    // 遍历历史记录
+    QDateTime currentDateTime = QDateTime::currentDateTime();
+    node today{currentDateTime.date().year(), currentDateTime.date().month(), currentDateTime.date().day()};
+    QDateTime LastTime = QDateTime::fromSecsSinceEpoch(0);
+
+    for (const QJsonValue &historyValue : historyArray) {
+        if (historyValue.isString()) {
+            // 处理每个好友 JSON 字符串
+            QString friendJsonStr = historyValue.toString();
+            QJsonDocument HistoryDoc = QJsonDocument::fromJson(friendJsonStr.toUtf8());
+            if (HistoryDoc.isObject()) {
+                QJsonObject historyObj = HistoryDoc.object();
+                int id = historyObj["id"].toString().toInt();  // 这里以前有坑!!!
+                QString message = historyObj["message"].toString();
+                QString msgtime = historyObj["time"].toString();
+                QString name = historyObj["name"].toString();
+
+                QDateTime dateTime = QDateTime::fromString(msgtime, "yyyy-MM-dd HH:mm:ss");
+                // 根据dateTime判断是否显示时间
+                node x{dateTime.date().year(), dateTime.date().month(), dateTime.date().day()};
+                if(timeset.count(x) == 0 && !(x == today))
+                {
+                    dealMessageTime(dateTime, 0);
+                    timeset.insert(x);
+                }
+                qint64 diffMinutes = LastTime.msecsTo(dateTime) / 60000;
+                if(x == today && diffMinutes >= 10)
+                {
+                    dealMessageTime(dateTime, 1);
+                    LastTime = dateTime;
+                }
+
+                // 更新前端界面
+                QNChatMessage* messageWidget;
+
+                // 设置对方消息样式
+                QNChatMessage::User_Type userType;
+                if(id != userid)
+                {
+                    if(_avatars[name].isNull())
+                    {
+                        _list[name] = {id, false};
+                        getImage(name);
+                    }
+                    userType = QNChatMessage::User_She, messageWidget = new QNChatMessage(messageList, &_avatars[name]);
+                }
+                else userType = QNChatMessage::User_Me, messageWidget = new QNChatMessage(messageList, &avatar);
+
+                QString time = QString::number(QDateTime::currentDateTime().toTime_t());
+                QSize size = messageWidget->fontRect(message);
+
+                // 这里要用到后台发来的姓名
+                if(id == userid) messageWidget->setText(message, time, size, userType, username);
+                else
+                {
+                    if(isgroup)
+                    {
+                        messageWidget->setText(message, time, size, userType, name, true);
+                    }
+                    else messageWidget->setText(message, time, size, userType, name);
+                }
+
+                // 更新消息状态为发送成功
+                messageWidget->setTextSuccess();
+
+                // 添加到列表
+                QListWidgetItem* item = new QListWidgetItem();
+                item->setSizeHint(size);
+                messageList->addItem(item);
+                messageList->setItemWidget(item, messageWidget);
+            }
+        }
+    }
+    QTimer::singleShot(2, this, &MainWindow::refreshMessageLayout);
+    messageList->scrollToItem(messageList->item(messageList->count() - 1), QAbstractItemView::PositionAtBottom);
+}
+
+// 查询未读消息数处理
+void MainWindow::handleNewMsgAck(const QJsonObject& jsonObj)
+{
+    qDebug() << "获取NewMsgAck";
+    QString name = jsonObj["name"].toString();
+    int cnt = jsonObj["cnt"].toInt();
+    if(cnt == 0) contactList->setItemValue(mp[name], 0);
+    else if(cnt > 0)
+    {
+        contactList->setItemValue(mp[name], cnt);
+        int row = contactList->row(mp[name]);
+        QListWidgetItem* takenItem = contactList->takeItem(row); // 移除item
+        contactList->insertItem(0, takenItem); // 插入到顶部(第0行)
+    }
+}
+
+// 图片查询处理
+void MainWindow::handleImageReqAck(const QJsonObject& jsonObj)
+{
+    if(jsonObj["isSuccess"].toString() == QString("false")) return;
+    qDebug() << "触发imageReqAck";
+    QString base64Data = jsonObj["image_data"].toString();
+    qDebug() << "Base64数据长度: " << base64Data.length();
+
+    if (base64Data.isEmpty()) {
+        qDebug() << "错误: Base64数据为空";
+        return;
+    }
+
+    // Base64解码
+    QByteArray imageData = QByteArray::fromBase64(base64Data.toUtf8());
+    qDebug() << "解码后图片数据大小: " << imageData.size() << " 字节";
+
+    if (imageData.isEmpty()) {
+        qDebug() << "错误: 解码后图片数据为空";
+        return;
+    }
+
+    QString name = jsonObj["username"].toString();
+
+    // 转换为QPixmap
+    if(name == username) avatar.loadFromData(imageData);
     else
     {
-        qDebug() << "返回数据不是有效的 JSON 格式！";
-        continue;
+        _avatars[name].loadFromData(imageData);
+        // 如果当前list不为空, 更新一遍头像
+        if(messageList->count() != 0) reloadAvatar();
     }
-
-    int msgid = jsonObj["msgid"].toInt();
-    switch(msgid)
-    {
-    // 初始化回复处理  ========================================== //
-    case InitMsgAck:
-        // 初始化好友列表
-        if (jsonObj.contains("friends") && jsonObj["friends"].isArray()) {
-            QJsonArray friendsArray = jsonObj["friends"].toArray();
-
-            // 遍历 friends 数组
-            for (const QJsonValue &friendValue : friendsArray) {
-                if (friendValue.isString()) {
-                    // 处理每个好友 JSON 字符串
-                    QString friendJsonStr = friendValue.toString();
-                    QJsonDocument friendDoc = QJsonDocument::fromJson(friendJsonStr.toUtf8());
-                    if (friendDoc.isObject()) {
-                        QJsonObject friendObj = friendDoc.object();
-                        int id = friendObj["id"].toString().toInt();  // 这里以前有坑!!!
-                        QString name = friendObj["name"].toString();
-                        QString state = friendObj["state"].toString();
-                        // 存入当前好友列表中
-                        _list.insert({name, {id, false}});
-                        // 再向后端申请对应好友的头像
-                        getImage(name);
-                        // 更新前端界面
-                        addToContactList(name, false);
-                    }
-                }
-            }
-        }
-        // 初始化群组列表
-        if (jsonObj.contains("groups") && jsonObj["groups"].isArray()) {
-            QJsonArray groupsArray = jsonObj["groups"].toArray();
-
-            // 遍历 groups 数组
-            for (const QJsonValue &groupValue : groupsArray) {
-                if (groupValue.isString()) {
-                    // 解析 JSON 字符串
-                    QString groupJsonStr = groupValue.toString();
-                    QJsonDocument groupDoc = QJsonDocument::fromJson(groupJsonStr.toUtf8());
-                    if (groupDoc.isObject()) {
-                        QJsonObject groupObj = groupDoc.object();
-                        int groupId = groupObj["id"].toString().toInt();  // 转换群组 ID
-                        QString groupName = groupObj["groupname"].toString();
-
-                        // 存入当前群组列表
-                        _list.insert({groupName, {groupId, true}});
-                        // 更新前端 UI（假设群组列表是 groupList）
-                        addToContactList(groupName, true);
-                    }
-                }
-            }
-        }
-
-        contactList->clearSelection();
-        contactList->setCurrentItem(nullptr);
-
-        break;
-    // 私聊回复处理 ========================================== //
-    case OTOMsg:
-    case GroupChatMsg:
-    {
-        // sendername
-        QString name, sendername;
-        if(msgid == OTOMsg) name = jsonObj["sender"].toString(), sendername = name;
-        else name = jsonObj["groupname"].toString(), sendername = jsonObj["sendername"].toString();
-        QString message = jsonObj["message"].toString();
-
-        // 只有当前选中的item是对应的才更新列表
-        if(!contactList->currentItem() || name != contactList->currentItem()->text())
-        {
-            // 到达这里之前肯定已经经历过查询了
-            // 说明当前消息未查看, 计数+1
-            qDebug() << mp[name];
-            contactList->setItemValue(mp[name], contactList->getItemValue(mp[name]) + 1);
-            int row = contactList->row(mp[name]);
-            QListWidgetItem* takenItem = contactList->takeItem(row); // 移除item
-            contactList->insertItem(0, takenItem); // 插入到顶部(第0行)
-
-            // 告知后端未读消息数+1
-            QJsonObject jsonObj;
-            jsonObj["userid"] = userid;
-            jsonObj["sender"] = _list[name].first;
-            jsonObj["isgroup"] = _list[name].second;
-            jsonObj["msgid"] = addNewMsgCnt;  // 添加 msgid 属性
-            // 转换为 JSON 字符串
-            QJsonDocument jsonDoc(jsonObj);
-            QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-            // 通过 socket 发送 JSON 数据
-            tcpclient->send(jsonData);
-            break;
-        }
-
-        // 创建消息控件
-        QNChatMessage* messageWidget = new QNChatMessage(messageList, &_avatars[sendername]);
-        QString time = QString::number(QDateTime::currentDateTime().toTime_t());
-        QSize size = messageWidget->fontRect(message);
-
-        // 设置对方消息样式
-        QNChatMessage::User_Type userType = QNChatMessage::User_She;
-
-        if(msgid == OTOMsg) messageWidget->setText(message, time, size, userType, name, false);
-        else messageWidget->setText(message, time, size, userType, jsonObj["sendername"].toString(), true);
-
-        // 添加到列表
-        QListWidgetItem* item = new QListWidgetItem();
-        item->setSizeHint(size);
-        messageList->addItem(item);
-        messageList->setItemWidget(item, messageWidget);
-
-        // 接收到消息直接拉到最底
-        messageList->scrollToItem(messageList->item(messageList->count() - 1), QAbstractItemView::PositionAtBottom);
-    }
-        break;
-    // 添加业务处理 ========================================== //
-    case AddFriendMsgAck:
-        if(jsonObj.contains("errmsg"))
-            addFriendLabel->setText(jsonObj["errmsg"].toString());
-        if(jsonObj["errno"].toInt() != 0) return;
-        // 更新聊天列表与map
-        addToContactList(jsonObj["friendname"].toString(), false);
-        _list.insert({jsonObj["friendname"].toString(), {jsonObj["friendid"].toInt(), false}});
-        break;
-    case AddGroupMsgAck:
-        if(jsonObj.contains("errmsg"))
-            addFriendLabel->setText(jsonObj["errmsg"].toString());
-        if(jsonObj["errno"].toInt() != 0) return;
-        // 更新聊天列表与map
-        addToContactList(jsonObj["groupname"].toString(), true);
-        _list.insert({jsonObj["groupname"].toString(), {jsonObj["groupid"].toInt(), true}});
-        break;
-    // 创建群聊业务 ========================================== //
-    case CreateGroupMsgAck:
-        if(jsonObj.contains("errmsg"))
-            addFriendLabel->setText(jsonObj["errmsg"].toString());
-        if(jsonObj["errno"].toInt() != 0) return;
-        // 更新聊天列表与map
-        addToContactList(jsonObj["groupname"].toString(), true);
-        _list.insert({jsonObj["groupname"].toString(), {jsonObj["groupid"].toInt(), true}});
-        break;
-    // 历史记录处理 ========================================== //
-    case HistoryMsgAck:
-        qDebug() << "[DEBUG] HistoryMsgAck received, contains history:" << jsonObj.contains("history");
-        if (jsonObj.contains("history") && jsonObj["history"].isArray()) {
-            // 检查响应是否属于当前选中的聊天（异步响应可能乱序到达）
-            bool isgroup = jsonObj["isgroup"].toBool();
-            bool isCurrentChat = false;
-            QString currentChat;
-            if (contactList->currentItem()) {
-                currentChat = contactList->currentItem()->text();
-                if (!currentChat.isEmpty() && _list.count(currentChat)) {
-                    auto& info = _list[currentChat];
-                    qDebug() << "[DEBUG] Matching: userid=" << userid
-                             << "currentChat=" << currentChat
-                             << "info.first=" << info.first << "info.second=" << info.second
-                             << "isgroup=" << isgroup;
-                    if (!isgroup && !info.second && jsonObj.contains("id1") && jsonObj.contains("id2")) {
-                        int rId1 = jsonObj["id1"].toInt();
-                        int rId2 = jsonObj["id2"].toInt();
-                        isCurrentChat = (rId1 == userid && rId2 == info.first);
-                        qDebug() << "[DEBUG] oto match: rId1=" << rId1 << "rId2=" << rId2
-                                 << "check1=" << (rId1 == userid) << "check2=" << (rId2 == info.first)
-                                 << "result=" << isCurrentChat;
-                    } else if (isgroup && info.second && jsonObj.contains("groupid")) {
-                        int rGid = jsonObj["groupid"].toInt();
-                        isCurrentChat = (rGid == info.first);
-                        qDebug() << "[DEBUG] group match: rGid=" << rGid << "info.first=" << info.first
-                                 << "result=" << isCurrentChat;
-                    }
-                } else {
-                    qDebug() << "[DEBUG] currentChat empty or not in _list. currentChat=" << currentChat
-                             << "_list.count=" << _list.count(currentChat);
-                }
-            } else {
-                qDebug() << "[DEBUG] contactList has no currentItem!";
-            }
-            if (!isCurrentChat) {
-                qDebug() << "[DEBUG] HistoryMsgAck REJECTED!";
-                break;
-            }
-            qDebug() << "[DEBUG] HistoryMsgAck ACCEPTED, rendering history...";
-
-            QJsonArray historyArray = jsonObj["history"].toArray();
-            // 遍历历史记录
-            QDateTime currentDateTime = QDateTime::currentDateTime();
-            node today{currentDateTime.date().year(), currentDateTime.date().month(), currentDateTime.date().day()};
-            QDateTime LastTime = QDateTime::fromSecsSinceEpoch(0);
-
-            for (const QJsonValue &historyValue : historyArray) {
-                if (historyValue.isString()) {
-                    // 处理每个好友 JSON 字符串
-                    QString friendJsonStr = historyValue.toString();
-                    QJsonDocument HistoryDoc = QJsonDocument::fromJson(friendJsonStr.toUtf8());
-                    if (HistoryDoc.isObject()) {
-                        QJsonObject historyObj = HistoryDoc.object();
-                        int id = historyObj["id"].toString().toInt();  // 这里以前有坑!!!
-                        QString message = historyObj["message"].toString();
-                        QString msgtime = historyObj["time"].toString();
-                        QString name = historyObj["name"].toString();
-
-                        QDateTime dateTime = QDateTime::fromString(msgtime, "yyyy-MM-dd HH:mm:ss");
-                        // 根据dateTime判断是否显示时间
-                        node x{dateTime.date().year(), dateTime.date().month(), dateTime.date().day()};
-                        if(timeset.count(x) == 0 && !(x == today))
-                        {
-                            dealMessageTime(dateTime, 0);
-                            timeset.insert(x);
-                        }
-                        qint64 diffMinutes = LastTime.msecsTo(dateTime) / 60000;
-                        if(x == today && diffMinutes >= 10)
-                        {
-                            dealMessageTime(dateTime, 1);
-                            LastTime = dateTime;
-                        }
-
-                        // 更新前端界面
-                        QNChatMessage* messageWidget;
-
-                        // 设置对方消息样式
-                        QNChatMessage::User_Type userType;
-                        if(id != userid)
-                        {
-                            if(_avatars[name].isNull())
-                            {
-                                _list[name] = {id, false};
-                                getImage(name);
-                            }
-                            userType = QNChatMessage::User_She, messageWidget = new QNChatMessage(messageList, &_avatars[name]);
-                        }
-                        else userType = QNChatMessage::User_Me, messageWidget = new QNChatMessage(messageList, &avatar);
-
-                        QString time = QString::number(QDateTime::currentDateTime().toTime_t());
-                        QSize size = messageWidget->fontRect(message);
-
-                        // 这里要用到后台发来的姓名
-                        if(id == userid) messageWidget->setText(message, time, size, userType, username);
-                        else
-                        {
-                            if(isgroup)
-                            {
-                                messageWidget->setText(message, time, size, userType, name, true);
-                            }
-                            else messageWidget->setText(message, time, size, userType, name);
-                        }
-
-                        // 更新消息状态为发送成功
-                        messageWidget->setTextSuccess();
-
-                        // 添加到列表
-                        QListWidgetItem* item = new QListWidgetItem();
-                        item->setSizeHint(size);
-                        messageList->addItem(item);
-                        messageList->setItemWidget(item, messageWidget);
-                    }
-                }
-            }
-            QTimer::singleShot(2, this, &MainWindow::refreshMessageLayout);
-            messageList->scrollToItem(messageList->item(messageList->count() - 1), QAbstractItemView::PositionAtBottom);
-        }
-        break;
-    // 查询未读消息数处理========================================================//
-    case NewMsgAck:
-    {
-        qDebug() << "获取NewMsgAck";
-        QString name = jsonObj["name"].toString();
-        int cnt = jsonObj["cnt"].toInt();
-        if(cnt == 0) contactList->setItemValue(mp[name], 0);
-        else if(cnt > 0)
-        {
-            contactList->setItemValue(mp[name], cnt);
-            int row = contactList->row(mp[name]);
-            QListWidgetItem* takenItem = contactList->takeItem(row); // 移除item
-            contactList->insertItem(0, takenItem); // 插入到顶部(第0行)
-        }
-    }
-        break;
-    // 图片查询处理==============================================================//
-    case imageReqAck:
-        {
-            if(jsonObj["isSuccess"].toString() == QString("false")) break;
-            qDebug() << "触发imageReqAck";
-            QString base64Data = jsonObj["image_data"].toString();
-            qDebug() << "Base64数据长度: " << base64Data.length();
-
-            if (base64Data.isEmpty()) {
-                qDebug() << "错误: Base64数据为空";
-                break;
-            }
-
-            // Base64解码
-            QByteArray imageData = QByteArray::fromBase64(base64Data.toUtf8());
-            qDebug() << "解码后图片数据大小: " << imageData.size() << " 字节";
-
-            if (imageData.isEmpty()) {
-                qDebug() << "错误: 解码后图片数据为空";
-                break;
-            }
-
-            QString name = jsonObj["username"].toString();
-
-            // 转换为QPixmap
-            if(name == username) avatar.loadFromData(imageData);
-            else
-            {
-                _avatars[name].loadFromData(imageData);
-                // 如果当前list不为空, 更新一遍头像
-                if(messageList->count() != 0) reloadAvatar();
-            }
-        }
-        break;
-    default:
-        break;
-    }
-    } // end while
 }
 
 void MainWindow::reloadAvatar()
@@ -744,17 +732,13 @@ void MainWindow::addToContactList(QString name, bool isgroup)
     mp[name] = item;
 
     // 向后台查询未读消息数
-    QJsonObject jsonObj;
-    jsonObj["userid"] = userid;
-    jsonObj["sender"] = _list[name].first;
-    jsonObj["name"] = name;
-    jsonObj["isgroup"] = _list[name].second;
-    jsonObj["msgid"] = NewMsg;  // 添加 msgid 属性
-    // 转换为 JSON 字符串
-    QJsonDocument jsonDoc(jsonObj);
-    QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-    // 通过 socket 发送 JSON 数据
-    tcpclient->send(jsonData);
+    tcpclient->sendJson(QJsonObject{
+        {"userid", userid},
+        {"sender", _list[name].first},
+        {"name", name},
+        {"isgroup", _list[name].second},
+        {"msgid", NewMsg}
+    });
 
     if(!isgroup) item->setIcon(QIcon(":/image/otochat.png"));
     else item->setIcon(QIcon(":/image/groupchat.png"));
@@ -767,7 +751,6 @@ void MainWindow::sendMessage()
     // 获取输入框中的文本
     QString message = messageInput->toPlainText();
     if (message.isEmpty()) return;
-    //if(messageList->item(0)->text() == QString("Welcome to my ChatClient!")) return;
 
     // 清空输入框
     messageInput->clear();
@@ -807,35 +790,24 @@ void MainWindow::sendMessage()
 
     if(!_list[name].second)  // 个人, 私聊
     {
-        QJsonObject jsonObj;
-        jsonObj["id"] = userid;
-        jsonObj["sender"] = username;
-        jsonObj["to"] = _list[name].first;
-        jsonObj["msgid"] = OTOMsg;  // 添加 msgid 属性
-        jsonObj["message"] = message;
-
-        // 转换为 JSON 字符串
-        QJsonDocument jsonDoc(jsonObj);
-        QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-
-        // 通过 socket 发送 JSON 数据
-        tcpclient->send(jsonData);
+        tcpclient->sendJson(QJsonObject{
+            {"id", userid},
+            {"sender", username},
+            {"to", _list[name].first},
+            {"msgid", OTOMsg},
+            {"message", message}
+        });
     }
     else   // 群, 群聊
     {
-        QJsonObject jsonObj;
-        jsonObj["userid"] = userid;
-        jsonObj["sendername"] = username;
-        jsonObj["groupid"] = _list[name].first;
-        jsonObj["groupname"] = name;
-        jsonObj["msgid"] = GroupChatMsg;  // 添加 msgid 属性
-        jsonObj["message"] = message;
-
-        // 转换为 JSON 字符串
-        QJsonDocument jsonDoc(jsonObj);
-        QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-        // 通过 socket 发送 JSON 数据
-        tcpclient->send(jsonData);
+        tcpclient->sendJson(QJsonObject{
+            {"userid", userid},
+            {"sendername", username},
+            {"groupid", _list[name].first},
+            {"groupname", name},
+            {"msgid", GroupChatMsg},
+            {"message", message}
+        });
     }
 }
 
@@ -857,7 +829,7 @@ void MainWindow::reloadMsgList()
     messageList->clear();
     // 向后端发出查找历史记录的请求
     QJsonObject jsonObj;
-    jsonObj["msgid"] = HistoryMsg;  // 添加 msgid 属性
+    jsonObj["msgid"] = HistoryMsg;
     if(!_list[current].second)  // 个人
     {
         jsonObj["isgroup"] = false;
@@ -869,25 +841,15 @@ void MainWindow::reloadMsgList()
         jsonObj["isgroup"] = true;
         jsonObj["groupid"] = _list[current].first;
     }
-    // 转换为 JSON 字符串
-    QJsonDocument jsonDoc(jsonObj);
-    QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-
-    // 通过 socket 发送 JSON 数据
-    tcpclient->send(jsonData);
+    tcpclient->sendJson(jsonObj);
 
     // 请求到信息后再发出清除未读消息数的消息
-    // 向后台查询未读消息数
-    QJsonObject jsonObj2;
-    jsonObj2["userid"] = userid;
-    jsonObj2["sender"] = _list[current].first;
-    jsonObj2["isgroup"] = _list[current].second;
-    jsonObj2["msgid"] = removeNewMsgCnt;  // 添加 msgid 属性
-    // 转换为 JSON 字符串
-    QJsonDocument jsonDoc2(jsonObj2);
-    QByteArray jsonData2 = jsonDoc2.toJson();  // 获取 JSON 数据的字节数组
-    // 通过 socket 发送 JSON 数据
-    tcpclient->send(jsonData2);
+    tcpclient->sendJson(QJsonObject{
+        {"userid", userid},
+        {"sender", _list[current].first},
+        {"isgroup", _list[current].second},
+        {"msgid", removeNewMsgCnt}
+    });
 
     // 取消标记
     contactList->setItemValue(mp[current], 0);
@@ -896,18 +858,12 @@ void MainWindow::reloadMsgList()
 // 向后端发出初始化界面的请求
 void MainWindow::initByTCP()
 {
-    // 创建 JSON 对象并添加数据
-    QJsonObject jsonObj;
-    jsonObj["msgid"] = InitMsg;  // 添加 msgid 属性
-    jsonObj["id"] = userid;
+    tcpclient->sendJson(QJsonObject{
+        {"msgid", InitMsg},
+        {"id", userid}
+    });
 
-    // 转换为 JSON 字符串
-    QJsonDocument jsonDoc(jsonObj);
-    QByteArray jsonData = jsonDoc.toJson();  // 获取 JSON 数据的字节数组
-
-    qDebug() << QString("已发送: ") + jsonData;
-
-    tcpclient->send(jsonData);
+    qDebug() << "已发送初始化请求, userid:" << userid;
 
     _list.insert({username, {userid, false}});
     getImage(username);
@@ -915,13 +871,11 @@ void MainWindow::initByTCP()
 
 void MainWindow::getImage(QString& name)
 {
-    QJsonObject jsonObj;
-    jsonObj["userid"] = _list[name].first;
-    jsonObj["username"] = name;
-    jsonObj["msgid"] = imageReq;
-    QJsonDocument jsonDoc(jsonObj);
-    QByteArray jsonData = jsonDoc.toJson();
-    tcpclient->send(jsonData);
+    tcpclient->sendJson(QJsonObject{
+        {"userid", _list[name].first},
+        {"username", name},
+        {"msgid", imageReq}
+    });
 }
 
 void MainWindow::onAddFriendClicked() {

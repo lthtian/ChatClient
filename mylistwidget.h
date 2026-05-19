@@ -23,6 +23,11 @@ public:
         connect(this, &QListWidget::customContextMenuRequested, this, &MyListWidget::showContextMenu);
         contextMenu = new QMenu();
 
+        // 连接菜单的 aboutToHide 信号（只连接一次，避免在 showContextMenu 中重复连接导致泄漏）
+        connect(contextMenu, &QMenu::aboutToHide, this, [this]() {
+            emit menuHidden();
+        });
+
         // 设置闪烁定时器
         m_blinkTimer = new QTimer(this);
         connect(m_blinkTimer, &QTimer::timeout, this, &MyListWidget::onBlinkTimerTimeout);
