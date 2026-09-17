@@ -1,7 +1,10 @@
+<!-- ABOUTME: Defines chat, image transfer feedback and the original-image preview. -->
+<!-- ABOUTME: Loads renderer scripts under a local-content security policy. -->
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: chat-image:; connect-src 'none'; object-src 'none'; base-uri 'none'">
   <title>Chat Client</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -30,7 +33,7 @@
   <!-- ========== 聊天界面 ========== -->
   <div id="chat-view" class="view" style="display: none;">
     <div class="sidebar">
-      <div class="sidebar-header"><span id="user-info"></span></div>
+      <div class="sidebar-header"><span id="user-info"></span><button class="toolbar-btn" id="image-tasks" title="未完成的图片发送任务">待发送</button></div>
       <div class="sidebar-toolbar">
         <button class="toolbar-btn" id="btn-add-friend" title="添加好友">＋友</button>
         <button class="toolbar-btn" id="btn-add-group" title="加入群组">＋群</button>
@@ -42,8 +45,11 @@
     </div>
     <div class="chat-main">
       <div class="chat-header" id="chat-header">选择一个联系人开始聊天</div>
+      <div id="image-notice" role="status" hidden></div>
+      <div class="history-toolbar"><button id="history-more" hidden>加载更早消息</button><span id="history-status" role="status"></span></div>
       <div class="messages" id="messages"></div>
       <div class="input-area">
+        <button id="image-send" title="发送 JPEG / PNG 图片，最大 20 MB">图片</button>
         <textarea id="msg-input" placeholder="输入消息..." rows="2"></textarea>
         <button id="send-btn">发送</button>
       </div>
@@ -68,7 +74,16 @@
     <div class="ctx-item" id="ctx-remove">删除好友</div>
   </div>
 
-  <script src="./tcp.js"></script>
+  <dialog id="image-viewer" aria-label="查看原图">
+    <div class="viewer-toolbar"><span id="original-status" role="status"></span><button id="viewer-retry" hidden>重试</button><button id="viewer-size">实际大小</button><button id="viewer-close" aria-label="关闭原图">关闭</button></div>
+    <div class="viewer-content"><img id="original-image" alt="原图"></div>
+  </dialog>
+  <dialog id="image-task-dialog" aria-label="待发送图片">
+    <div class="task-heading"><strong>待发送图片</strong><button id="image-tasks-close">关闭</button></div>
+    <div id="image-task-list"></div>
+  </dialog>
+  <script src="./chat_connection.js"></script>
+  <script src="./image_view.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

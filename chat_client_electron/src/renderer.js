@@ -1,7 +1,5 @@
-// ========== 配置 ==========
-const SERVER_HOST = '39.105.18.142';
-const SERVER_PORT = 7000;
-
+// ABOUTME: Renders chat views and handles account and conversation interactions.
+// ABOUTME: Connects the Electron interface to the chat server over TCP.
 // ========== 消息类型（和服务端 public.h 一一对应）==========
 const MsgType = {
   LoginMsg: 1, LoginMsgAck: 2,
@@ -22,7 +20,7 @@ const MsgType = {
 // sendAndWait 负责处理的响应类型，通用 handler 跳过
 const RESPONSE_TYPES = new Set([
   MsgType.LoginMsgAck, MsgType.RegMsgAck, MsgType.InitMsgAck,
-  MsgType.HistoryMsgAck, MsgType.NewMsgAck, MsgType.imageReqAck,
+  MsgType.HistoryMsgAck, MsgType.NewMsgAck, 27,
   MsgType.AddFriendMsgAck, MsgType.AddGroupMsgAck, MsgType.CreateGroupMsgAck,
 ]);
 
@@ -38,6 +36,10 @@ const state = {
   dialogOP: -1,           // 1=加好友 2=加群 3=建群
   contextTarget: null,    // 右键菜单目标联系人
   regAvatar: '',          // 注册时选择的头像 base64 数据
+  jobs: new Map(),
+  cursors: new Map(),
+  connected: false,
+  historyRequest: 0,
 };
 
 // ========== TCP 客户端 ==========
@@ -72,6 +74,7 @@ const ctxRemove   = $('ctx-remove');
 const avatarSelector = $('avatar-selector');
 const avatarPreview  = $('avatar-preview');
 const avatarInput    = $('avatar-input');
+const imageView = new ImageView();
 
 // ========== 图片压缩（注册头像）==========
 function compressImage(file, maxSize, quality) {
@@ -127,7 +130,8 @@ async function init() {
   passwordIn.disabled = true;
 
   try {
-    await tcp.connect(SERVER_HOST, SERVER_PORT);
+    await tcp.connect();
+    state.connected = true;
     loginTitle.textContent = '登录';
     loginBtn.disabled = false;
     usernameIn.disabled = false;
@@ -135,6 +139,9 @@ async function init() {
     usernameIn.focus();
   } catch (err) {
     loginTitle.textContent = '连接失败: ' + err.message;
+    loginBtn.disabled = false;
+    usernameIn.disabled = false;
+    passwordIn.disabled = false;
   }
 }
 
@@ -156,14 +163,24 @@ async function handleLogin() {
   }
 
   try {
+    if (!state.connected) { await tcp.connect(); state.connected = true; }
     const resp = await tcp.sendAndWait(payload, ackId, 5000);
     if (resp.errno === 0) {
       if (state.isLoginMode) {
+        if (state.userId !== Number(resp.id)) {
+          state.contacts.clear(); state.messages.clear(); state.avatars.clear(); state.jobs.clear();
+          state.cursors.clear(); state.currentChat = null;
+          messagesDiv.replaceChildren(); imageView.cache.clear();
+          chatHeader.textContent = '选择一个联系人开始聊天';
+        }
         state.userId = parseInt(resp.id);
         state.userName = resp.name;
         loginTitle.textContent = '登录成功';
         showChatView();
         await loadContacts();
+        for (const job of await window.chat.jobs()) state.jobs.set(job.id, job);
+        renderImageTasks();
+        if (state.currentChat) renderMessages();
       } else {
         loginTitle.textContent = '注册成功，请登录';
         state.isLoginMode = true;
@@ -192,6 +209,7 @@ async function loadContacts() {
       MsgType.InitMsgAck, 5000
     );
 
+    state.contacts.clear();
     if (resp.friends) {
       for (const s of resp.friends) {
         const f = JSON.parse(s);
@@ -230,41 +248,123 @@ async function queryUnread(name, info) {
 }
 
 // ========== 聊天 ==========
-async function loadHistory(name) {
+async function loadHistory(name, older = false) {
   const info = state.contacts.get(name);
   if (!info) return;
-  state.messages.set(name, []);
-
-  const req = { msgid: MsgType.HistoryMsg };
-  if (!info.isGroup) {
-    req.isgroup = false; req.id1 = state.userId; req.id2 = info.id;
-  } else {
-    req.isgroup = true; req.groupid = info.id;
-  }
+  const request = ++state.historyRequest;
+  const previous = state.messages.get(name) || [];
+  const startCount = previous.length;
+  $('history-status').textContent = '加载中…';
+  $('history-more').disabled = true;
+  if (!older) renderMessages(true);
 
   try {
-    const resp = await tcp.sendAndWait(req, MsgType.HistoryMsgAck, 5000);
-    if (resp.history) {
-      const msgs = [];
-      for (const s of resp.history) {
-        const h = JSON.parse(s);
-        msgs.push({
-          text: h.message, time: h.time,
-          isMine: String(h.id) === String(state.userId),
-          senderName: h.name,
-        });
-      }
-      state.messages.set(name, msgs);
-    }
+    const resp = await window.chat.history({ conversation: { is_group: info.isGroup, target: info.id },
+      before_id: older ? Number(state.cursors.get(name) || 0) : 0, limit: 50 });
+    if (request !== state.historyRequest || state.currentChat !== name) return;
+    const height = messagesDiv.scrollHeight;
+    const top = messagesDiv.scrollTop;
+    const arrived = (state.messages.get(name) || []).slice(startCount);
+    const messages = resp.messages.map(chatMessage);
+    const combined = older ? [...messages, ...(state.messages.get(name) || [])] : [...messages, ...arrived];
+    const ids = new Set();
+    state.messages.set(name, combined.filter(message => {
+      if (!message.message_id) return true;
+      if (ids.has(message.message_id)) return false;
+      ids.add(message.message_id); return true;
+    }));
+    state.cursors.set(name, resp.next_cursor);
+    $('history-more').hidden = !resp.next_cursor;
+    $('history-more').textContent = '加载更早消息';
+    $('history-more').onclick = () => loadHistory(name, true);
+    $('history-status').textContent = '';
     // 清除未读计数
     tcp.sendJson({ msgid: MsgType.removeNewMsgCnt, userid: state.userId, sender: info.id, isgroup: info.isGroup });
     info.unread = 0;
     renderContacts();
-    renderMessages();
+    renderMessages(!older);
+    if (older) messagesDiv.scrollTop = top + messagesDiv.scrollHeight - height;
   } catch (err) {
-    console.error('加载历史消息失败:', err);
+    if (request !== state.historyRequest) return;
+    $('history-status').textContent = '历史消息加载失败';
+    $('history-more').hidden = false;
+    $('history-more').textContent = '重试';
+    $('history-more').onclick = () => loadHistory(name, older);
+  } finally {
+    if (request === state.historyRequest) $('history-more').disabled = false;
   }
 }
+
+function chatMessage(message) {
+  return { ...message, time: new Date(message.time).toLocaleString(),
+    isMine: Number(message.sender_id) === state.userId, senderName: message.sender_name };
+}
+
+function conversationName(target) {
+  return [...state.contacts].find(([, info]) => info.id === target.target && info.isGroup === target.is_group)?.[0];
+}
+
+function receiveImage(message, target) {
+  const name = conversationName(target);
+  if (!name) return;
+  const messages = state.messages.get(name) || [];
+  if (messages.some(value => value.message_id === message.message_id)) return;
+  messages.push(chatMessage(message)); state.messages.set(name, messages);
+  if (state.currentChat === name) renderMessages(Number(message.sender_id) === state.userId);
+  else if (Number(message.sender_id) !== state.userId) {
+    const info = state.contacts.get(name); info.unread++;
+    tcp.sendJson({ msgid: MsgType.addNewMsgCnt, userid: state.userId, sender: info.id, isgroup: info.isGroup });
+    renderContacts();
+  }
+}
+
+window.chat.on('task', job => {
+  if (job.state === 'sent' || job.state === 'canceled') {
+    state.jobs.delete(job.id);
+    renderImageTasks();
+    if (job.message) receiveImage(job.message, job.conversation);
+    if (state.currentChat === conversationName(job.conversation)) renderMessages();
+    return;
+  }
+  state.jobs.set(job.id, job);
+  renderImageTasks();
+  if (state.currentChat !== conversationName(job.conversation)) return;
+  const element = messagesDiv.querySelector(`[data-task="${job.id}"]`);
+  if (element) imageView.updateTask(element, job);
+  else renderMessages(true);
+});
+window.chat.on('image-error', error => imageNotice(imageError(error)));
+window.addEventListener('chat-error', event => imageNotice(imageError(event.detail)));
+tcp.on('disconnected', () => {
+  state.connected = false; state.historyRequest++;
+  imageView.reset(); imageView.close();
+  $('image-task-dialog').close();
+  imageView.cache.clear();
+  chatView.style.display = 'none'; loginView.style.display = 'flex';
+  loginTitle.textContent = '连接已断开，请重新登录；图片任务已保留';
+  loginBtn.disabled = false;
+});
+$('image-send').onclick = async () => {
+  const info = state.contacts.get(state.currentChat);
+  if (!info) { imageNotice('先选择一个联系人或群聊'); return; }
+  try { imageNotice(''); await window.chat.pick({ is_group: info.isGroup, target: info.id }); }
+  catch (error) { imageNotice(imageError(error.message)); }
+};
+
+function renderImageTasks() {
+  $('image-tasks').textContent = state.jobs.size ? `待发送 ${state.jobs.size}` : '待发送';
+  if (!$('image-task-dialog').open) return;
+  const list = $('image-task-list'); list.replaceChildren();
+  if (!state.jobs.size) { list.textContent = '没有未完成的图片任务'; return; }
+  for (const job of state.jobs.values()) {
+    const item = document.createElement('div'); item.className = 'image-task-item';
+    const title = document.createElement('p');
+    title.textContent = `${conversationName(job.conversation) || `会话 ${job.conversation.target}`} · ${job.name}`;
+    item.append(title, imageView.bubble({ job }, job.conversation)); list.append(item);
+  }
+}
+$('image-tasks').onclick = () => { $('image-task-dialog').showModal(); renderImageTasks(); };
+$('image-tasks-close').onclick = () => $('image-task-dialog').close();
 
 function sendMessage() {
   const text = msgInput.value.trim();
@@ -409,6 +509,9 @@ tcp.on('message', (msg) => {
   if (RESPONSE_TYPES.has(msg.msgid)) return;
 
   switch (msg.msgid) {
+    case 28:
+      receiveImage(msg.message, msg.conversation);
+      break;
     case MsgType.OTOMsg:
       handleIncomingChat(msg, false);
       break;
@@ -502,10 +605,20 @@ function renderContacts() {
   }
 }
 
-function renderMessages() {
+function renderMessages(forceBottom = false) {
+  const top = messagesDiv.scrollTop;
+  const stickBottom = forceBottom || messagesDiv.scrollHeight - top - messagesDiv.clientHeight < 100;
+  imageView.reset();
   messagesDiv.innerHTML = '';
-  const msgs = state.messages.get(state.currentChat) || [];
+  const msgs = [...(state.messages.get(state.currentChat) || [])];
   const contactInfo = state.contacts.get(state.currentChat);
+  for (const job of state.jobs.values()) {
+    if (conversationName(job.conversation) === state.currentChat &&
+        !msgs.some(message => message.client_msg_id === job.id)) {
+      msgs.push({ kind: 'image', job, time: new Date(job.createdAt).toLocaleString(),
+        isMine: true, senderName: state.userName });
+    }
+  }
 
   let lastDate = '';
   let lastTime = 0;
@@ -559,9 +672,13 @@ function renderMessages() {
       body.appendChild(sender);
     }
 
-    const bubble = document.createElement('div');
-    bubble.className = `msg-bubble ${msg.isMine ? 'sent' : 'received'}`;
-    bubble.textContent = msg.text;
+    const bubble = msg.kind === 'image'
+      ? imageView.bubble(msg, { is_group: contactInfo.isGroup, target: contactInfo.id })
+      : document.createElement('div');
+    if (msg.kind !== 'image') {
+      bubble.className = `msg-bubble ${msg.isMine ? 'sent' : 'received'}`;
+      bubble.textContent = msg.text;
+    }
     body.appendChild(bubble);
 
     // 组装：自己的消息头像在右，对方在左
@@ -576,7 +693,7 @@ function renderMessages() {
     messagesDiv.appendChild(row);
   }
 
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  messagesDiv.scrollTop = stickBottom ? messagesDiv.scrollHeight : top;
 }
 
 // ========== 事件绑定 ==========

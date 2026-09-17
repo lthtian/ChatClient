@@ -1,3 +1,5 @@
+// ABOUTME: Exchanges framed chat messages over a main-process TCP connection.
+// ABOUTME: Correlates media requests and rejects pending operations on disconnect.
 const net = require('net');
 const EventEmitter = require('events');
 
@@ -13,30 +15,36 @@ class TcpClient extends EventEmitter {
     super();
     this.socket = null;
     this.buffer = '';
+    this.lanes = new Map();
   }
 
   /**
    * 连接服务器（异步，不阻塞 UI）
    */
   connect(host, port) {
+    if (this.socket) throw new Error('连接已存在');
+    this.buffer = '';
     return new Promise((resolve, reject) => {
       this.socket = net.createConnection({ host, port }, () => {
-        console.log('已连接到服务器');
+        this.socket.setTimeout(0);
         this.emit('connected');
         resolve();
       });
+      this.socket.setTimeout(5000, () => this.socket?.destroy(new Error('连接超时')));
 
       this.socket.on('error', (err) => {
-        this.emit('error', err);
+        if (this.listenerCount('error')) this.emit('error', err);
         reject(err);
       });
 
+      this.socket.setEncoding('utf8');
       this.socket.on('data', (data) => {
-        this.buffer += data.toString();
+        this.buffer += data;
         this._parseMessages();
       });
 
       this.socket.on('close', () => {
+        this.socket = null;
         this.emit('disconnected');
       });
     });
@@ -53,7 +61,7 @@ class TcpClient extends EventEmitter {
         const json = JSON.parse(msg);
         this.emit('message', json);
       } catch (e) {
-        console.error('JSON 解析失败:', msg);
+        this.close();
       }
     }
   }
@@ -94,7 +102,7 @@ class TcpClient extends EventEmitter {
     }
 
     if (this.buffer.length > 1024 * 1024) {
-      console.error('缓冲区溢出，清空');
+      this.close();
       this.buffer = '';
     }
 
@@ -107,7 +115,7 @@ class TcpClient extends EventEmitter {
   sendJson(obj) {
     if (this.socket && !this.socket.destroyed) {
       this.socket.write(JSON.stringify(obj));
-    }
+    } else throw new Error('连接已断开');
   }
 
   /**
@@ -122,29 +130,47 @@ class TcpClient extends EventEmitter {
    *   console.log(resp.errno); // 直接拿到响应数据
    */
   sendAndWait(sendObj, waitMsgId, timeout = 5000) {
+    if (sendObj.request_id) return this._wait(sendObj, waitMsgId, timeout);
+    const previous = this.lanes.get(waitMsgId) || Promise.resolve();
+    const pending = previous.catch(() => {}).then(() => this._wait(sendObj, waitMsgId, timeout));
+    this.lanes.set(waitMsgId, pending);
+    pending.finally(() => {
+      if (this.lanes.get(waitMsgId) === pending) this.lanes.delete(waitMsgId);
+    }).catch(() => {});
+    return pending;
+  }
+
+  _wait(sendObj, waitMsgId, timeout) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const cleanup = () => {
         this.off('message', handler);
+        this.off('disconnected', disconnected);
+        clearTimeout(timer);
+      };
+      const disconnected = () => { cleanup(); reject(new Error('连接已断开')); };
+      const timer = setTimeout(() => {
+        cleanup();
+        if (!sendObj.request_id) this.close();
         reject(new Error(`等待 msgid ${waitMsgId} 超时`));
       }, timeout);
 
       const handler = (msg) => {
-        if (msg.msgid === waitMsgId) {
-          this.off('message', handler);
-          clearTimeout(timer);
+        if (msg.msgid === waitMsgId &&
+            (!sendObj.request_id || msg.request_id === sendObj.request_id)) {
+          cleanup();
           resolve(msg);
         }
       };
 
       this.on('message', handler);
-      this.sendJson(sendObj);
+      this.once('disconnected', disconnected);
+      try { this.sendJson(sendObj); } catch (error) { cleanup(); reject(error); }
     });
   }
 
   close() {
     if (this.socket) {
-      this.socket.end();
-      this.socket = null;
+      this.socket.destroy();
     }
   }
 }

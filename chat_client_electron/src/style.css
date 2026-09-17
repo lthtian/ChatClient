@@ -1,3 +1,5 @@
+/* ABOUTME: Styles the chat layout, picture messages and transfer feedback. */
+/* ABOUTME: Keeps image dimensions stable during lazy loading and original preview. */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
@@ -276,3 +278,34 @@ body {
   color: #333; transition: background 0.15s;
 }
 .ctx-item:hover { background: #f0f0f0; }
+[hidden] { display: none !important; }
+#image-notice { padding: 9px 18px; color: #804d13; background: #fff5df; font-size: 13px; }
+.history-toolbar { min-height: 28px; display: flex; justify-content: center; align-items: center; gap: 12px; font-size: 12px; color: #68746c; }
+.history-toolbar button, .picture-actions button, .picture-link { border: 0; background: none; color: #16824a; cursor: pointer; padding: 4px 8px; }
+#image-send { align-self: center; border: 1px solid #d5e6d9; color: #16824a; background: #f0f9f3; border-radius: 6px; padding: 10px 13px; cursor: pointer; }
+.picture-message { max-width: 250px; }
+.picture-button { position: relative; display: block; overflow: hidden; border: 1px solid #e0e5e1; border-radius: 8px; background: #edf1ee; cursor: pointer; }
+.picture-button img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.picture-button img:not([src]) { visibility: hidden; }
+.picture-hint { position: absolute; inset: 0; display: grid; place-items: center; padding: 8px; color: #68746c; font-size: 12px; }
+.picture-state { padding: 6px 0 0; color: #69786f; font-size: 12px; overflow-wrap: anywhere; }
+.picture-actions { display: flex; gap: 8px; }
+.picture-link { font-size: 12px; padding-left: 0; }
+#image-viewer { margin: auto; width: 92vw; height: 90vh; max-width: 1500px; max-height: 95vh; border: 0; border-radius: 10px; background: #1d2421; color: #fff; overflow: hidden; }
+#image-viewer::backdrop { background: #000a; }
+.viewer-toolbar { height: 58px; padding: 12px 18px; display: flex; align-items: center; gap: 12px; background: #29312c; }
+#original-status { flex: 1; font-size: 13px; }
+.viewer-toolbar button { background: #424e45; border: 0; border-radius: 5px; padding: 8px 14px; color: #fff; cursor: pointer; }
+.viewer-content { height: calc(100% - 58px); overflow: auto; display: grid; align-items: safe center; justify-items: safe center; padding: 14px; }
+#original-image { max-width: 100%; max-height: 100%; object-fit: contain; }
+#original-image.actual-size { max-width: none; max-height: none; }
+#original-image:not([src]) { visibility: hidden; }
+#image-task-dialog { margin: auto; width: 440px; max-height: 80vh; border: 1px solid #d5e6d9; border-radius: 10px; padding: 20px; }
+#image-task-dialog::backdrop { background: #0005; }
+.task-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.task-heading button { border: 0; background: #eef4f0; border-radius: 5px; padding: 6px 12px; cursor: pointer; }
+.image-task-item { padding: 12px 0; border-top: 1px solid #edf1ee; }
+.image-task-item p { margin-bottom: 8px; font-size: 13px; overflow-wrap: anywhere; }
+.sidebar-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#user-info { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar-btn { white-space: nowrap; flex-shrink: 0; }

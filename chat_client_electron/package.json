@@ -4,6 +4,8 @@
   "description": "Chat client for TianMu Chat Server",
   "main": "main.js",
   "scripts": {
+    "dev": "electron .",
+    "tunnel": "ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 127.0.0.1:16000:127.0.0.1:6000 -L 127.0.0.1:16001:127.0.0.1:6002 lth@39.105.18.142",
     "start": "electron ."
   },
   "devDependencies": {
