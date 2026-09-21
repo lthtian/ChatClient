@@ -75,6 +75,7 @@ const avatarSelector = $('avatar-selector');
 const avatarPreview  = $('avatar-preview');
 const avatarInput    = $('avatar-input');
 const imageView = new ImageView();
+const fileView = new FileView();
 
 // ========== 图片压缩（注册头像）==========
 function compressImage(file, maxSize, quality) {
@@ -170,17 +171,20 @@ async function handleLogin() {
         if (state.userId !== Number(resp.id)) {
           state.contacts.clear(); state.messages.clear(); state.avatars.clear(); state.jobs.clear();
           state.cursors.clear(); state.currentChat = null;
-          messagesDiv.replaceChildren(); imageView.cache.clear();
+          messagesDiv.replaceChildren(); imageView.cache.clear(); fileView.reset();
           chatHeader.textContent = '选择一个联系人开始聊天';
         }
         state.userId = parseInt(resp.id);
         state.userName = resp.name;
         loginTitle.textContent = '登录成功';
+        sendBtn.disabled = false; $('image-send').disabled = false; $('file-send').disabled = false;
+        $('connection-login').hidden = true; imageNotice('');
         showChatView();
         await loadContacts();
+        state.jobs.clear();
         for (const job of await window.chat.jobs()) state.jobs.set(job.id, job);
         renderImageTasks();
-        if (state.currentChat) renderMessages();
+        if (state.currentChat) await loadHistory(state.currentChat);
       } else {
         loginTitle.textContent = '注册成功，请登录';
         state.isLoginMode = true;
@@ -252,41 +256,35 @@ async function loadHistory(name, older = false) {
   const info = state.contacts.get(name);
   if (!info) return;
   const request = ++state.historyRequest;
-  const previous = state.messages.get(name) || [];
-  const startCount = previous.length;
   $('history-status').textContent = '加载中…';
   $('history-more').disabled = true;
   if (!older) renderMessages(true);
 
   try {
-    const resp = await window.chat.history({ conversation: { is_group: info.isGroup, target: info.id },
-      before_id: older ? Number(state.cursors.get(name) || 0) : 0, limit: 50 });
+    const query = { conversation: { is_group: info.isGroup, target: info.id },
+      before_sequence: older ? Number(state.cursors.get(name) || 0) : 0, limit: 50 };
+    const display = resp => {
+      if (request !== state.historyRequest || state.currentChat !== name) return;
+      const height = messagesDiv.scrollHeight, top = messagesDiv.scrollTop;
+      mergeMessages(name, resp.messages);
+      state.cursors.set(name, resp.next_cursor);
+      $('history-more').hidden = !resp.next_cursor;
+      $('history-more').textContent = '加载更早消息';
+      $('history-more').onclick = () => loadHistory(name, true);
+      renderMessages(!older);
+      if (older) messagesDiv.scrollTop = top + messagesDiv.scrollHeight - height;
+    };
+    display(await window.chat.history(query));
+    if (state.connected) display(await window.chat.syncHistory(query));
     if (request !== state.historyRequest || state.currentChat !== name) return;
-    const height = messagesDiv.scrollHeight;
-    const top = messagesDiv.scrollTop;
-    const arrived = (state.messages.get(name) || []).slice(startCount);
-    const messages = resp.messages.map(chatMessage);
-    const combined = older ? [...messages, ...(state.messages.get(name) || [])] : [...messages, ...arrived];
-    const ids = new Set();
-    state.messages.set(name, combined.filter(message => {
-      if (!message.message_id) return true;
-      if (ids.has(message.message_id)) return false;
-      ids.add(message.message_id); return true;
-    }));
-    state.cursors.set(name, resp.next_cursor);
-    $('history-more').hidden = !resp.next_cursor;
-    $('history-more').textContent = '加载更早消息';
-    $('history-more').onclick = () => loadHistory(name, true);
-    $('history-status').textContent = '';
+    $('history-status').textContent = state.connected ? '' : '离线：显示本地记录';
     // 清除未读计数
-    tcp.sendJson({ msgid: MsgType.removeNewMsgCnt, userid: state.userId, sender: info.id, isgroup: info.isGroup });
+    if (state.connected) tcp.sendJson({ msgid: MsgType.removeNewMsgCnt, userid: state.userId, sender: info.id, isgroup: info.isGroup });
     info.unread = 0;
     renderContacts();
-    renderMessages(!older);
-    if (older) messagesDiv.scrollTop = top + messagesDiv.scrollHeight - height;
   } catch (err) {
     if (request !== state.historyRequest) return;
-    $('history-status').textContent = '历史消息加载失败';
+    $('history-status').textContent = '同步未完成，已保留本地记录';
     $('history-more').hidden = false;
     $('history-more').textContent = '重试';
     $('history-more').onclick = () => loadHistory(name, older);
@@ -300,6 +298,19 @@ function chatMessage(message) {
     isMine: Number(message.sender_id) === state.userId, senderName: message.sender_name };
 }
 
+function mergeMessages(name, incoming) {
+  const key = message => message.client_msg_id
+    ? `${message.sender_id}:${message.client_msg_id}` : `message:${message.message_id}`;
+  const messages = new Map((state.messages.get(name) || []).map(message => [key(message), message]));
+  for (const message of incoming) {
+    const previous = messages.get(key(message));
+    if (previous?.message_id && !message.message_id) continue;
+    messages.set(key(message), chatMessage(message));
+  }
+  state.messages.set(name, [...messages.values()].sort((a, b) =>
+    (Number(a.sequence) || Number.MAX_SAFE_INTEGER) - (Number(b.sequence) || Number.MAX_SAFE_INTEGER)));
+}
+
 function conversationName(target) {
   return [...state.contacts].find(([, info]) => info.id === target.target && info.isGroup === target.is_group)?.[0];
 }
@@ -309,11 +320,11 @@ function receiveImage(message, target) {
   if (!name) return;
   const messages = state.messages.get(name) || [];
   if (messages.some(value => value.message_id === message.message_id)) return;
-  messages.push(chatMessage(message)); state.messages.set(name, messages);
+  mergeMessages(name, [message]);
   if (state.currentChat === name) renderMessages(Number(message.sender_id) === state.userId);
   else if (Number(message.sender_id) !== state.userId) {
     const info = state.contacts.get(name); info.unread++;
-    tcp.sendJson({ msgid: MsgType.addNewMsgCnt, userid: state.userId, sender: info.id, isgroup: info.isGroup });
+    if (state.connected) tcp.sendJson({ msgid: MsgType.addNewMsgCnt, userid: state.userId, sender: info.id, isgroup: info.isGroup });
     renderContacts();
   }
 }
@@ -330,20 +341,35 @@ window.chat.on('task', job => {
   renderImageTasks();
   if (state.currentChat !== conversationName(job.conversation)) return;
   const element = messagesDiv.querySelector(`[data-task="${job.id}"]`);
-  if (element) imageView.updateTask(element, job);
+  if (element) (job.kind === 'file' ? fileView : imageView).updateTask(element, job);
   else renderMessages(true);
 });
 window.chat.on('image-error', error => imageNotice(imageError(error)));
+window.chat.on('stored', async value => {
+  const name = conversationName(value.conversation);
+  if (!name) return;
+  if (value.message) { receiveImage(value.message, value.conversation); return; }
+  const owner = state.userId;
+  try {
+    const page = await window.chat.history({ conversation: value.conversation, limit: 50 });
+    if (owner !== state.userId) return;
+    mergeMessages(name, page.messages);
+    if (state.currentChat === name) renderMessages();
+  } catch (error) { imageNotice(imageError(error.message)); }
+});
 window.addEventListener('chat-error', event => imageNotice(imageError(event.detail)));
 tcp.on('disconnected', () => {
   state.connected = false; state.historyRequest++;
-  imageView.reset(); imageView.close();
   $('image-task-dialog').close();
-  imageView.cache.clear();
-  chatView.style.display = 'none'; loginView.style.display = 'flex';
-  loginTitle.textContent = '连接已断开，请重新登录；图片任务已保留';
+  sendBtn.disabled = true; $('image-send').disabled = true; $('file-send').disabled = true;
+  $('connection-login').hidden = false;
+  imageNotice('连接已断开，可查看本地记录和已缓存附件；重新登录后同步。');
+  loginTitle.textContent = '连接已断开，请重新登录';
   loginBtn.disabled = false;
 });
+$('connection-login').onclick = () => {
+  imageView.close(); chatView.style.display = 'none'; loginView.style.display = 'flex';
+};
 $('image-send').onclick = async () => {
   const info = state.contacts.get(state.currentChat);
   if (!info) { imageNotice('先选择一个联系人或群聊'); return; }
@@ -355,34 +381,35 @@ function renderImageTasks() {
   $('image-tasks').textContent = state.jobs.size ? `待发送 ${state.jobs.size}` : '待发送';
   if (!$('image-task-dialog').open) return;
   const list = $('image-task-list'); list.replaceChildren();
-  if (!state.jobs.size) { list.textContent = '没有未完成的图片任务'; return; }
+  if (!state.jobs.size) { list.textContent = '没有未完成的发送任务'; return; }
   for (const job of state.jobs.values()) {
     const item = document.createElement('div'); item.className = 'image-task-item';
     const title = document.createElement('p');
     title.textContent = `${conversationName(job.conversation) || `会话 ${job.conversation.target}`} · ${job.name}`;
-    item.append(title, imageView.bubble({ job }, job.conversation)); list.append(item);
+    item.append(title, (job.kind === 'file' ? fileView : imageView).bubble({ job }, job.conversation)); list.append(item);
   }
 }
 $('image-tasks').onclick = () => { $('image-task-dialog').showModal(); renderImageTasks(); };
 $('image-tasks-close').onclick = () => $('image-task-dialog').close();
+$('file-send').onclick = async () => {
+  const info = state.contacts.get(state.currentChat);
+  if (!info) { imageNotice('先选择一个联系人或群聊'); return; }
+  try { imageNotice(''); await window.chat.pickFile({ is_group: info.isGroup, target: info.id }); }
+  catch (error) { imageNotice(imageError(error.message)); }
+};
 
-function sendMessage() {
+async function sendMessage() {
   const text = msgInput.value.trim();
   if (!text || !state.currentChat) return;
   const info = state.contacts.get(state.currentChat);
   if (!info) return;
 
-  const msgs = state.messages.get(state.currentChat) || [];
-  msgs.push({ text, time: new Date().toLocaleString(), isMine: true, senderName: state.userName });
-  state.messages.set(state.currentChat, msgs);
-  renderMessages();
-  msgInput.value = '';
-
-  if (!info.isGroup) {
-    tcp.sendJson({ msgid: MsgType.OTOMsg, id: state.userId, sender: state.userName, to: info.id, message: text });
-  } else {
-    tcp.sendJson({ msgid: MsgType.GroupChatMsg, userid: state.userId, sendername: state.userName, groupid: info.id, groupname: state.currentChat, message: text });
-  }
+  sendBtn.disabled = true;
+  try {
+    await window.chat.sendText({ conversation: { is_group: info.isGroup, target: info.id }, text });
+    if (msgInput.value.trim() === text) msgInput.value = '';
+  } catch (error) { imageNotice(imageError(error.message)); }
+  finally { sendBtn.disabled = !state.connected; }
 }
 
 // ========== 头像 ==========
@@ -615,7 +642,7 @@ function renderMessages(forceBottom = false) {
   for (const job of state.jobs.values()) {
     if (conversationName(job.conversation) === state.currentChat &&
         !msgs.some(message => message.client_msg_id === job.id)) {
-      msgs.push({ kind: 'image', job, time: new Date(job.createdAt).toLocaleString(),
+      msgs.push({ kind: job.kind === 'file' ? 'file' : 'image', job, time: new Date(job.createdAt).toLocaleString(),
         isMine: true, senderName: state.userName });
     }
   }
@@ -674,12 +701,28 @@ function renderMessages(forceBottom = false) {
 
     const bubble = msg.kind === 'image'
       ? imageView.bubble(msg, { is_group: contactInfo.isGroup, target: contactInfo.id })
+      : msg.kind === 'file' ? fileView.bubble(msg, { is_group: contactInfo.isGroup, target: contactInfo.id })
       : document.createElement('div');
-    if (msg.kind !== 'image') {
+    if (msg.kind !== 'image' && msg.kind !== 'file') {
       bubble.className = `msg-bubble ${msg.isMine ? 'sent' : 'received'}`;
       bubble.textContent = msg.text;
     }
     body.appendChild(bubble);
+    if (msg.kind === 'text' && msg.isMine && msg.status && msg.status !== 'sent') {
+      const status = document.createElement('div'); status.className = 'picture-state';
+      status.textContent = msg.status === 'pending' ? '发送中…' : '尚未确认发送结果';
+      body.appendChild(status);
+      if (msg.status !== 'pending') {
+        const retry = document.createElement('button'); retry.className = 'picture-link'; retry.textContent = '重试';
+        retry.onclick = async () => {
+          retry.disabled = true;
+          try { await window.chat.retryText(msg.client_msg_id); }
+          catch (error) { imageNotice(imageError(error.message)); }
+          finally { retry.disabled = false; }
+        };
+        body.appendChild(retry);
+      }
+    }
 
     // 组装：自己的消息头像在右，对方在左
     if (msg.isMine) {

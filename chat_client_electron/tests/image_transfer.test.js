@@ -7,7 +7,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const { once } = require('node:events');
-const { transferFile, endpoint } = require('../src/image_transfer');
+const { transferFile, endpoint } = require('../src/media_transfer');
 
 test('rejects cleartext public endpoints and embedded credentials', () => {
   for (const url of ['http://example.com/media', 'https://user:pass@example.com/media']) {

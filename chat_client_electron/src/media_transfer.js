@@ -1,4 +1,4 @@
-// ABOUTME: Streams image files with byte limits, cancellation and transfer progress.
+// ABOUTME: Streams media files with byte limits, cancellation and transfer progress.
 // ABOUTME: Accepts HTTPS or loopback HTTP descriptors without following redirects.
 const http = require('node:http');
 const https = require('node:https');
@@ -27,7 +27,7 @@ function counter(expected, progress) {
 }
 
 async function transferFile({ descriptor, file, bytes, signal, progress, uploaded }) {
-  if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > 20 * 1024 * 1024) throw new Error('byte_limit');
+  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > 100 * 1024 * 1024) throw new Error('byte_limit');
   const url = endpoint(descriptor);
   const upload = descriptor.method === 'PUT';
   const headers = { ...descriptor.headers };
@@ -36,7 +36,7 @@ async function transferFile({ descriptor, file, bytes, signal, progress, uploade
     method: descriptor.method, headers, signal,
   });
   request.setTimeout(30000, () => request.destroy(new Error('transfer_timeout')));
-  const deadline = setTimeout(() => request.destroy(new Error('transfer_timeout')), 180000);
+  const deadline = setTimeout(() => request.destroy(new Error('transfer_timeout')), bytes > 20 * 1024 * 1024 ? 1800000 : 180000);
   const response = new Promise((resolve, reject) => {
     request.once('response', resolve);
     request.once('error', reject);

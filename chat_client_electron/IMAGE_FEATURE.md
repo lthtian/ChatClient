@@ -1,5 +1,9 @@
 # 图片功能运行与排查
 
+本地消息和图片缓存的实现、当前验收状态及部署前提见 [本地存储说明](LOCAL_STORAGE.md)。
+
+研究发送、加载、存储及失败恢复流程，见 [图片功能链路图](IMAGE_FLOW.md)（含 Mermaid 图和代码入口）。
+
 在本目录打开两个终端。第一个终端执行 `npm run tunnel`，输入 SSH 登录密码后保持运行；第二个终端执行 `npm run dev`。
 
 SSH 把本机 16000 转发到服务器聊天端口 6000，把本机 16001 转发到服务器回环图片端口 6002。图片文件不会通过公开静态目录暴露。终端提示端口占用时先检查是否已经有同一条隧道，不要叠加启动。
@@ -22,3 +26,5 @@ SSH 把本机 16000 转发到服务器聊天端口 6000，把本机 16001 转发
 测试入口：`tests/tcp.test.js`、`tests/image_transfer.test.js`、`tests/image_processor.test.js`，以及连接真实隔离服务的 `tests/image_client.test.js`、`tests/image_window.test.js`。窗口测试使用独立 userData，不读取个人登录信息。
 
 图片交互取舍和服务端对应代码见服务端项目 `docs/chat-image-client-details.md`。视频、动图、粘贴/拖放、分片续传和 OSS 不在当前实现范围。
+
+普通文件链路、使用方式与部署前提见 [文件功能说明](FILE_FEATURE.md)。

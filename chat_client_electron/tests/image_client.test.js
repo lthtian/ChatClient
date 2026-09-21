@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const TcpClient = require('../src/tcp');
-const { ImageClient } = require('../src/image_client');
+const { MediaClient } = require('../src/media_client');
 const port = Number(process.argv[2]);
 const fixture = process.argv[3] ? require('node:fs').readFileSync(process.argv[3])
   : Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGPgUbLwA2EABYEBaWcDN6YAAAAASUVORK5CYII=', 'base64');
@@ -26,7 +26,11 @@ function until(client, id, terminal) {
 }
 test('sends and restores real image tasks against the running service', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-image-client-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const clients = [];
+  t.after(async () => {
+    for (const client of clients) await client.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
   const tcp = new TcpClient(); tcp.on('error', () => {});
   await tcp.connect('127.0.0.1', port);
   t.after(() => tcp.close());
@@ -37,7 +41,8 @@ test('sends and restores real image tasks against the running service', async t 
     if (!response.ok) throw new Error(response.error);
     return response.data;
   };
-  const client = new ImageClient({ root, toolPath, rpc });
+  const client = new MediaClient({ root, toolPath, rpc });
+  clients.push(client);
   const failures = []; client.on('storage-error', value => failures.push(value));
   await client.login(4); t.after(() => client.suspend());
   const source = path.join(root, '中文 图片.png'); await fs.writeFile(source, fixture);
@@ -70,7 +75,8 @@ test('sends and restores real image tasks against the running service', async t 
   const stopped = until(client, paused.id, 'paused');
   client.suspend(); await stopped;
   await fs.rm(source);
-  const restored = new ImageClient({ root, toolPath, rpc });
+  const restored = new MediaClient({ root, toolPath, rpc });
+  clients.push(restored);
   restored.on('storage-error', value => failures.push(value));
   const jobs = await restored.login(4); t.after(() => restored.suspend());
   assert.equal(jobs[0].state, 'paused');

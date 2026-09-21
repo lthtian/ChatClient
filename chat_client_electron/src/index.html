@@ -40,6 +40,7 @@
         <button class="toolbar-btn" id="btn-create-group" title="创建群组">建群</button>
         <div style="flex:1"></div>
         <button class="toolbar-btn" id="btn-exit" title="退出">退出</button>
+        <button class="toolbar-btn" id="connection-login" hidden>重新登录</button>
       </div>
       <ul id="contact-list"></ul>
     </div>
@@ -50,6 +51,7 @@
       <div class="messages" id="messages"></div>
       <div class="input-area">
         <button id="image-send" title="发送 JPEG / PNG 图片，最大 20 MB">图片</button>
+        <button id="file-send" title="发送文件，最大 100 MB">文件</button>
         <textarea id="msg-input" placeholder="输入消息..." rows="2"></textarea>
         <button id="send-btn">发送</button>
       </div>
@@ -78,12 +80,13 @@
     <div class="viewer-toolbar"><span id="original-status" role="status"></span><button id="viewer-retry" hidden>重试</button><button id="viewer-size">实际大小</button><button id="viewer-close" aria-label="关闭原图">关闭</button></div>
     <div class="viewer-content"><img id="original-image" alt="原图"></div>
   </dialog>
-  <dialog id="image-task-dialog" aria-label="待发送图片">
-    <div class="task-heading"><strong>待发送图片</strong><button id="image-tasks-close">关闭</button></div>
+  <dialog id="image-task-dialog" aria-label="待发送任务">
+    <div class="task-heading"><strong>待发送任务</strong><button id="image-tasks-close">关闭</button></div>
     <div id="image-task-list"></div>
   </dialog>
   <script src="./chat_connection.js"></script>
   <script src="./image_view.js"></script>
+  <script src="./file_view.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

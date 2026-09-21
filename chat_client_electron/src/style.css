@@ -282,7 +282,10 @@ body {
 #image-notice { padding: 9px 18px; color: #804d13; background: #fff5df; font-size: 13px; }
 .history-toolbar { min-height: 28px; display: flex; justify-content: center; align-items: center; gap: 12px; font-size: 12px; color: #68746c; }
 .history-toolbar button, .picture-actions button, .picture-link { border: 0; background: none; color: #16824a; cursor: pointer; padding: 4px 8px; }
-#image-send { align-self: center; border: 1px solid #d5e6d9; color: #16824a; background: #f0f9f3; border-radius: 6px; padding: 10px 13px; cursor: pointer; }
+#image-send, #file-send { align-self: center; border: 1px solid #d5e6d9; color: #16824a; background: #f0f9f3; border-radius: 6px; padding: 10px 13px; cursor: pointer; }
+.file-message { width: 240px; padding: 14px; border: 1px solid #d5e6d9; border-radius: 8px; background: #f5faf6; }
+.file-name { font-weight: 600; overflow-wrap: anywhere; }
+.file-size, .file-status { margin-top: 6px; color: #69786f; font-size: 12px; overflow-wrap: anywhere; }
 .picture-message { max-width: 250px; }
 .picture-button { position: relative; display: block; overflow: hidden; border: 1px solid #e0e5e1; border-radius: 8px; background: #edf1ee; cursor: pointer; }
 .picture-button img { display: block; width: 100%; height: 100%; object-fit: contain; }

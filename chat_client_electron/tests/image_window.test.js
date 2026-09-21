@@ -34,6 +34,8 @@ app.whenReady().then(async () => {
     await wait('document.querySelectorAll("#contact-list li").length > 0');
     await evaluate('document.querySelector("#contact-list li").click()');
     await wait('!!document.querySelector(".picture-button img[src]")');
+    await wait('!!document.querySelector(".file-message .file-save")');
+    assert.ok(await evaluate('document.querySelector(".file-message").textContent.includes("资料 21MB.bin")'));
     const chat = await window.webContents.capturePage();
     fs.writeFileSync(path.join(process.argv[3], 'image-chat.png'), chat.toPNG());
     await evaluate('document.querySelector(".picture-link").click()');
@@ -43,13 +45,20 @@ app.whenReady().then(async () => {
     fs.writeFileSync(path.join(process.argv[3], 'image-preview.png'), preview.toPNG());
     await evaluate('document.getElementById("viewer-close").click()');
     assert.equal(await evaluate('document.getElementById("image-viewer").open'), false);
+    await evaluate(`document.getElementById('msg-input').value='窗口文本确认验证';
+      document.getElementById('send-btn').click();`);
+    await wait(`(state.messages.get(state.currentChat) || []).some(message =>
+      message.text === '窗口文本确认验证' && message.status === 'sent')`);
+    assert.equal(await evaluate(`[...document.querySelectorAll('.msg-bubble')]
+      .filter(element => element.textContent === '窗口文本确认验证').length`), 1);
     assert.deepEqual(errors, []);
     fs.writeFileSync(path.join(process.argv[3], 'image-window-result.json'), JSON.stringify({ ok: true }));
-    app.exit(0);
+    app.quit();
   } catch (error) {
     const failure = await window.webContents.capturePage();
     fs.writeFileSync(path.join(process.argv[3], 'image-window-failure.png'), failure.toPNG());
     fs.writeFileSync(path.join(process.argv[3], 'image-window-result.json'), JSON.stringify({ ok: false, error: error.message, errors }));
-    app.exit(1);
+    app.once('will-quit', () => app.exit(1));
+    app.quit();
   }
 });

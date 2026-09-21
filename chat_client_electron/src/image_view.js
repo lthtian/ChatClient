@@ -1,10 +1,12 @@
 // ABOUTME: Renders lazy image thumbnails, persistent send states and an original-image viewer.
 // ABOUTME: Cancels obsolete loads and keeps retryable failures local to each image.
 const imageErrors = {
+  aborted: '操作已取消，可以重试', ABORT_ERR: '操作已取消，可以重试',
+  file_byte_limit: '文件最大 100 MB', source_changed: '文件在准备过程中发生变化，请重新选择',
   byte_limit: '图片最大 20 MB', pixel_limit: '图片最多 2400 万像素，单边不超过 16000 像素',
   invalid_image: '图片已损坏，无法解码', unsupported_format: '仅支持静态 JPEG 和 PNG',
   processor_unavailable: '图片处理工具未安装', process_failed: '图片处理失败',
-  queue_full: '待发送图片最多 20 张，请先处理已有任务', ENOSPC: '本地磁盘空间不足',
+  queue_full: '待发送任务最多 20 个，请先处理已有任务', ENOSPC: '本地磁盘空间不足',
   expired: '上传任务已过期', unauthorized: '请重新登录', forbidden: '没有访问这段会话的权限',
   not_found: '图片不存在或无权访问', busy: '正在处理，请稍后重试',
   insecure_endpoint: '图片服务需要 HTTPS 或本地安全隧道', size_mismatch: '图片未完整传输',
@@ -14,6 +16,21 @@ function imageError(error) { return imageErrors[error] || `操作失败（${erro
 function imageNotice(message) {
   const element = document.getElementById('image-notice');
   element.textContent = message; element.hidden = !message;
+}
+function renderTaskActions(element, job) {
+  const actions = element.querySelector('.picture-actions'); actions.replaceChildren();
+  const button = (label, action) => {
+    const node = document.createElement('button'); node.textContent = label;
+    node.onclick = async () => {
+      node.disabled = true;
+      try { await action(job.id); }
+      catch (error) { imageNotice(imageError(error.message)); }
+      finally { node.disabled = false; }
+    };
+    actions.append(node);
+  };
+  if (['failed', 'paused', 'confirmed'].includes(job.state)) button('重试', window.chat.retry);
+  if (!['sent', 'canceling', 'confirmed'].includes(job.state)) button('取消', window.chat.cancel);
 }
 
 class ImageView {
@@ -115,17 +132,9 @@ class ImageView {
     const states = { preparing: '正在检查图片…', requesting: '准备上传…', queued: '等待上传…',
       uploading: `上传 ${job.progress}%`, processing: '上传完成，服务端处理中…',
       confirming: '正在确认发送结果…', paused: '连接已断开 · 待继续', canceling: '正在取消…',
-      failed: imageError(job.error), sent: '已发送' };
+      failed: imageError(job.error), sent: '已发送', confirmed: '已发送，缓存待整理' };
     element.querySelector('.picture-state').textContent = states[job.state] || job.state;
-    const actions = element.querySelector('.picture-actions'); actions.replaceChildren();
-    const button = (label, action) => {
-      const node = document.createElement('button'); node.textContent = label;
-      node.onclick = async () => { node.disabled = true; try { await action(job.id); }
-        catch (error) { imageNotice(imageError(error.message)); } finally { node.disabled = false; } };
-      actions.append(node);
-    };
-    if (['failed', 'paused'].includes(job.state)) button('重试', window.chat.retry);
-    if (!['sent', 'canceling'].includes(job.state)) button('取消', window.chat.cancel);
+    renderTaskActions(element, job);
   }
   async open(current, force = false) {
     if (!current) return;
