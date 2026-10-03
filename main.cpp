@@ -15,7 +15,10 @@ int main(int argc, char *argv[])
     QObject::connect(loginWindow, &LoginWindow::loginSuccess, &chatWindow, &MainWindow::setUser);
 
     // 异步连接服务器
-    tcpclient->connectToHost("39.105.18.142", 7000);
+    // 直接连接服务器的聊天入口，媒体地址由服务端另行返回。
+    const QString host = qEnvironmentVariable("CHAT_HOST", "39.105.18.142");
+    const int port = qEnvironmentVariableIntValue("CHAT_PORT");
+    tcpclient->connectToHost(host, port > 0 && port <= 65535 ? port : 7000);
 
     if (loginWindow->exec() == QDialog::Accepted) {
         loginWindow->close();  // 关闭登录窗口

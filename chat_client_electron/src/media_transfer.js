@@ -1,5 +1,5 @@
 // ABOUTME: Streams media files with byte limits, cancellation and transfer progress.
-// ABOUTME: Accepts HTTPS or loopback HTTP descriptors without following redirects.
+// HTTP 仅允许本机或明确配置的学习服务地址，不跟随重定向。
 const http = require('node:http');
 const https = require('node:https');
 const fs = require('node:fs');
@@ -9,9 +9,11 @@ const { pipeline } = require('node:stream/promises');
 
 function endpoint(descriptor) {
   const url = new URL(descriptor.url);
+  const mediaUrl = new URL(process.env.CHAT_MEDIA_URL || 'http://39.105.18.142/media');
   if (url.username || url.password || url.hash ||
       !(url.protocol === 'https:' || (url.protocol === 'http:' &&
-        ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)))) throw new Error('insecure_endpoint');
+        (['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ||
+         url.href === mediaUrl.href)))) throw new Error('insecure_endpoint');
   if (!['GET', 'PUT'].includes(descriptor.method)) throw new Error('invalid_descriptor');
   return url;
 }

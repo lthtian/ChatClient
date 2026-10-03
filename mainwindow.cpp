@@ -18,6 +18,8 @@
 #include <QEvent>
 #include "qnchatmessage.h"
 #include <QTimer>
+#include "media_transfer.h"
+#include "media_window.h"
 
 MainWindow::MainWindow(QWidget *parent, MyTcpClient* tc)
     : QMainWindow(parent), tcpclient(tc)
@@ -26,15 +28,15 @@ MainWindow::MainWindow(QWidget *parent, MyTcpClient* tc)
     setWindowTitle("聊天");
     resize(1200, 800);  // 更灵活的初始尺寸
     setMinimumSize(800, 600);  // 设置最小尺寸
-    this->setWindowTitle(" ");  // 隐藏标题
     this->setWindowIcon(QIcon(":/image/chat.png"));  // 移除图标
     setupUI();
     applyStyles();  // 应用样式
+    setupMedia();
 }
 
 MainWindow::~MainWindow()
 {
-
+    if (player_) delete player_.data();
 }
 
 
@@ -88,6 +90,7 @@ void MainWindow::setupUI()
     QWidget *rightWidget = new QWidget();
     QVBoxLayout *rightLayout = new QVBoxLayout(rightWidget);
     rightLayout->setContentsMargins(0, 0, 0, 0);  // 移除默认边距
+    rightLayout->setSpacing(0);
 
     // 聊天记录区域
     msgListLabel = new QLabel("欢迎来到TianMu的聊天服务器!");
@@ -100,39 +103,50 @@ void MainWindow::setupUI()
         "}"
     );
 
-    rightLayout->addWidget(msgListLabel, 4);
+    msgListLabel->setFixedHeight(64);
+    rightLayout->addWidget(msgListLabel);
 
     messageList = new QListWidget(this);
     messageList->setObjectName("chatHistory");
     messageList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    messageList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    messageList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     messageList->setVerticalScrollMode(QListWidget::ScrollPerPixel);    // 平滑滚动
     messageList->setSelectionMode(QAbstractItemView::NoSelection);
     messageList->setFocusPolicy(Qt::NoFocus);  // 禁用焦点框
     messageList->setStyleSheet("QListWidget { padding: 0px; }"
                                "QListWidget::item:selected { border: none; background-color: transparent; }");
-    rightLayout->addWidget(messageList, 30);
+    rightLayout->addWidget(messageList, 1);
 
     // 输入区域
     QWidget *inputWidget = new QWidget();
+    inputWidget->setObjectName("composer");
+    inputWidget->setFixedHeight(150);
+    inputWidget->setStyleSheet("QWidget#composer { background: #fafbfc; border-top: 1px solid #e2e7eb; }");
     QVBoxLayout *inputLayout = new QVBoxLayout(inputWidget);
     inputLayout->setContentsMargins(0, 0, 0, 0);  // 移除默认边距
     inputLayout->setSpacing(0);
 
     messageInput = new MyTextEdit();
     messageInput->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    messageInput->setStyleSheet("QTextEdit { background-color: #F0F0F0; border: none; font-size: 20px; padding-left: 30px; padding-right: 30px; padding-top: 20px; }");
+    messageInput->setStyleSheet("QTextEdit { background: transparent; border: none; font-size: 15px; padding: 14px 20px; }");
+    messageInput->setPlaceholderText(QStringLiteral("输入消息，Enter 发送"));
     messageInput->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     sendButton = new QPushButton("发送");
-    sendButton->setFixedWidth(120);  // 固定按钮宽度
-    sendButton->setFixedHeight(70);
+    sendButton->setFixedWidth(96);  // 固定按钮宽度
+    sendButton->setFixedHeight(36);
     sendButton->setObjectName("sendButton");
 
     QHBoxLayout *bLayout = new QHBoxLayout();
-    bLayout->addStretch();  // 将按钮推到右侧
+    bLayout->setContentsMargins(20, 0, 20, 14);
+    bLayout->setSpacing(12);
+    videoButton = new QPushButton(QStringLiteral("发送 MP4"), this);
+    videoButton->setObjectName("sendVideoButton");
+    videoButton->setFixedHeight(36);
+    bLayout->addWidget(videoButton);
+    bLayout->addStretch();  // 将发送按钮推到右侧
     bLayout->addWidget(sendButton);
 
-    // 创建一个水平布局来放置输入框和发送按钮
+    // 输入框与底部操作栏按上下方向排列。
     QVBoxLayout *inputButtonLayout = new QVBoxLayout();
     inputButtonLayout->setContentsMargins(0, 0, 0, 0);
     inputButtonLayout->setSpacing(0);
@@ -142,7 +156,7 @@ void MainWindow::setupUI()
     inputLayout->addLayout(inputButtonLayout);
     inputLayout->setSpacing(0);
 
-    rightLayout->addWidget(inputWidget, 5);
+    rightLayout->addWidget(inputWidget);
 
     // 组装主界面
     mainSplitter->addWidget(leftWidget);
@@ -315,10 +329,15 @@ void MainWindow::applyStyles()
             padding: 8px 15px;
         }
 
-        QPushButton#sendButton{
-            margin-right: 25px;
-            margin-bottom: 25px;
-            border-radius: 25px;
+        QPushButton#sendVideoButton {
+            background-color: #e9f6ee;
+            color: #158448;
+            border: 1px solid #cfe8d7;
+        }
+
+        QPushButton:disabled {
+            background-color: #e4e8e6;
+            color: #89928d;
         }
 
         QPushButton:hover {
@@ -348,6 +367,7 @@ int MainWindow::getUserId()
 // 根据返回的msgid, 触发不同的回复响应代码
 void MainWindow::recvHandler()
 {
+    if (userid < 0) return; // 登录应答由 LoginWindow 读取，避免两个窗口竞争半包。
     // 循环处理所有已缓冲的完整 JSON 帧，避免粘包导致消息延迟
     while (true) {
         QByteArray responseData = tcpclient->read();  // 读取返回的数据
@@ -362,6 +382,8 @@ void MainWindow::recvHandler()
         QJsonObject jsonObj = jsonDoc.object();
         int msgid = jsonObj["msgid"].toInt();
         switch (msgid) {
+        case MediaResponse:    media_->handleResponse(jsonObj); break;
+        case MediaMessage:     handleMediaMessage(jsonObj["conversation"].toObject(), jsonObj["message"].toObject()); break;
         case InitMsgAck:        handleInitMsgAck(jsonObj); break;
         case OTOMsg:
         case GroupChatMsg:      handleChatMsg(msgid, jsonObj); break;
@@ -576,6 +598,11 @@ void MainWindow::handleHistoryMsgAck(const QJsonObject& jsonObj)
                 QString message = historyObj["message"].toString();
                 QString msgtime = historyObj["time"].toString();
                 QString name = historyObj["name"].toString();
+
+                if (historyObj["kind"].toString() == "file") {
+                    appendVideoMessage(currentConversation(), historyObj["record"].toObject());
+                    continue;
+                }
 
                 QDateTime dateTime = QDateTime::fromString(msgtime, "yyyy-MM-dd HH:mm:ss");
                 // 根据dateTime判断是否显示时间
@@ -815,6 +842,7 @@ void MainWindow::reloadMsgList()
 {
     // 一旦触发reload就清空timeset
     timeset.clear();
+    if (!contactList->currentItem()) { ++historyGeneration_; return; }
     QString current = contactList->currentItem()->text();
     if(current.isEmpty()) return;
 
@@ -827,21 +855,12 @@ void MainWindow::reloadMsgList()
     msgListLabel->setText(current);
 
     messageList->clear();
+    displayedMedia_.clear();
+    mediaHistory_ = {};
+    pendingMedia_ = {};
+    historyLoading_ = true;
     // 向后端发出查找历史记录的请求
-    QJsonObject jsonObj;
-    jsonObj["msgid"] = HistoryMsg;
-    if(!_list[current].second)  // 个人
-    {
-        jsonObj["isgroup"] = false;
-        jsonObj["id1"] = userid;
-        jsonObj["id2"] = _list[current].first;
-    }
-    else // 群组
-    {
-        jsonObj["isgroup"] = true;
-        jsonObj["groupid"] = _list[current].first;
-    }
-    tcpclient->sendJson(jsonObj);
+    requestMediaHistory(currentConversation(), QString(), ++historyGeneration_);
 
     // 请求到信息后再发出清除未读消息数的消息
     tcpclient->sendJson(QJsonObject{

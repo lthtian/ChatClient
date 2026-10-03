@@ -25,8 +25,10 @@ void MyTcpClient::connectToHost(const QString &host, uint16_t port)
     }
 
     // 建立Tcp连接（异步，不阻塞UI）
+    m_buffer.clear();
     socket = new QTcpSocket(this);
     connect(socket, &QTcpSocket::connected, this, &MyTcpClient::connected);
+    connect(socket, &QTcpSocket::disconnected, this, &MyTcpClient::disconnected);
     connect(socket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
             this, [this](QAbstractSocket::SocketError) {
         emit connectionFailed(socket->errorString());
@@ -110,5 +112,5 @@ QByteArray MyTcpClient::read() {
 void MyTcpClient::close()
 {
     qDebug() << "已触发tcpclient析构";
-    socket->close();
+    if (socket) socket->close();
 }

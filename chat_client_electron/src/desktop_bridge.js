@@ -14,8 +14,8 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'chat-image', privileges: {
 
 function installBridge(win) {
   const tcp = new TcpClient();
-  const host = process.env.CHAT_HOST || '127.0.0.1';
-  const port = Number(process.env.CHAT_PORT || 16000);
+  const host = process.env.CHAT_HOST || '39.105.18.142';
+  const port = Number(process.env.CHAT_PORT || 7000);
   const assets = new Map();
   let account = 0;
   let authenticated = false, accountName = '', messages = null;

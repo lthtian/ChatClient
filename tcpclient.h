@@ -20,6 +20,7 @@ public:
 
 signals:
     void connected();
+    void disconnected(); // 登录连接断开，关联媒体凭证不再可用。
     void connectionFailed(QString error);
 
 private:

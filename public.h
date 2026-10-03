@@ -29,4 +29,7 @@ enum EnMsgType
     removeNewMsgCnt = 23,    // 消息数置0
     imageReq = 24,          // 图片请求
     imageReqAck = 25,       // 图片请求的回应
+    MediaRequest = 26,     // 媒体授权、发布与结构化历史请求。
+    MediaResponse = 27,    // 通过 request_id 关联的媒体业务结果。
+    MediaMessage = 28,     // 服务端实时推送的文本或媒体消息。
 };
