@@ -196,7 +196,7 @@ int main(int argc, char** argv)
             QObject::connect(&streaming, &MediaWindow::AuthorizationRequested, &app,
                 [&](quint64 session)
                 {
-                    receiving->requestPlaybackSource({{"is_group", false}, {"target", ids[0]}}, videoMedia,
+                    receiving->requestPlaybackSource({{"is_group", false}, {"target", ids[0]}}, videoMedia, {},
                         [target = QPointer<MediaWindow>(&streaming), relayUrl, session]
                         (MediaSource source, const QString& error)
                         {

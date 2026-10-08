@@ -35,7 +35,7 @@ class MediaTransfer : public QObject
                        const QJsonObject& media);             // 授权下载并校验，完成后交付本地路径。
     QString cachedVideoPath(const QJsonObject& media) const;  // 返回长度匹配的缓存路径，播放前仍校验摘要。
     void requestPlaybackSource(const QJsonObject& conversation, const QJsonObject& media,
-                               SourceCompletion complete);  // 只申请并验证在线凭证，不下载或写缓存。
+                               const QString& rendition, SourceCompletion complete);  // 在线授权；保留档位，不写本地缓存。
     void cancel();                                            // 取消尚未进入发布阶段的传输。
     bool busy() const { return busy_; }                       // 本模块一次只运行一个文件任务。
 

@@ -12,6 +12,7 @@
 #include "video_view.h"
 
 class QLabel;
+class QComboBox;
 class QPushButton;
 
 // 将左键点击位置直接映射到进度值；拖动时只更新预览，释放后执行 seek。
@@ -56,7 +57,7 @@ class MediaWindow : public QWidget {
  signals:
   void OpenRequested(MediaSource source,
                      quint64 session);  // 将输入描述复制给工作线程。
-  void AuthorizationRequested(quint64 session);  // 初次打开或过期恢复，交给聊天模块鉴权。
+  void AuthorizationRequested(quint64 session, QString rendition);  // 初次/过期时申请整套授权并保留档位。
   void AudioEnabledRequested(bool enabled);  // 无设备时通知后台跳过音轨，避免 PCM 堆积。
   void OutputRateRequested(int rate);   // 把设备采样率交给后台重采样器。
   void ReadRequested(quint64 session);  // 请求读取一个包，最多一个请求在途。
@@ -70,6 +71,8 @@ class MediaWindow : public QWidget {
   void RefreshAuthorization(qint64 position_us, bool play_after);  // 保留目标和播放意图重新授权。
   void BufferUnderrun(qint64 position_us);  // 保留待播放数据，冻结设备和时钟等待补充。
   void CreateControls();  // 构造界面与快捷键，并连接用户操作。
+  void UpdateRenditions();  // 从服务端源描述生成清晰度选项。
+  void ChangeRendition(int index);  // 保留位置和播放意图，重新打开所选媒体列表。
   void ConnectDecoder();  // 建立跨线程请求、结果及错误信号连接。
   void StartSeek(qint64 position_us,
                  bool play_after);     // 清 GUI/设备状态并发起定位。
@@ -89,6 +92,7 @@ class MediaWindow : public QWidget {
   ProgressSlider* progress_;  // 0～10000 的相对媒体位置。
   QSlider* volume_;           // 0～100 的感知音量滑块。
   QLabel* status_;            // 状态及时间显示。
+  QComboBox* quality_;        // HLS 已就绪档位；本地和单文件 HTTP 不显示。
   MediaDecoder* decoder_;  // 工作线程拥有操作权，由 finished/deleteLater 销毁。
   QThread thread_;         // GUI 线程中的线程管理对象，内部运行解码事件循环。
   QTimer timer_;           // 10ms 唤醒调度，不把 timeout 次数当作播放时间。

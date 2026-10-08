@@ -106,6 +106,8 @@ class MediaDecoder : public QObject {
   std::chrono::steady_clock::time_point io_deadline_;  // 本次操作最晚结束时刻。
   bool online_ = false;      // 仅在线输入使用网络超时；解码流程相同。
   qint64 origin_us_ = 0;      // 所有轨道共同减去的容器起点。
+  qint64 seek_origin_us_ = 0;  // HLS 分片索引使用首包 DTS 起点；其他输入使用容器起点。
+  bool packet_pending_ = false;  // 探测 HLS 起点时借读的首包，留给首次 Read 解码。
   qint64 target_us_ = 0;      // 当前 seek 目标；更早的数据只用于恢复解码状态。
   qint64 next_video_us_ = 0;  // 视频时间戳缺失时的连续估算值。
   qint64 frame_duration_us_ = 40000;  // 视频时长缺失时按帧率估计。

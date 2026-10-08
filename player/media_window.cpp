@@ -1,6 +1,7 @@
 ﻿#include "media_window.h"
 
 #include <QDateTime>
+#include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -69,6 +70,7 @@ MediaWindow::MediaWindow()
       progress_(new ProgressSlider(this)),
       volume_(new QSlider(Qt::Horizontal, this)),
       status_(new QLabel(this)),
+      quality_(new QComboBox(this)),
       decoder_(new MediaDecoder) {
   qRegisterMetaType<MediaBatch>();
   qRegisterMetaType<MediaSource>();
@@ -105,6 +107,11 @@ void MediaWindow::CreateControls() {
     controls->addWidget(button);
   controls->addWidget(volume_);
   controls->addStretch();
+  quality_->setObjectName("mediaQuality");
+  quality_->setToolTip(QStringLiteral("清晰度"));
+  quality_->hide();
+  controls->addWidget(quality_);
+  connect(quality_, QOverload<int>::of(&QComboBox::activated), this, &MediaWindow::ChangeRendition);
   controls->addWidget(fullscreen);
   auto* layout = new QVBoxLayout(this);
   layout->addWidget(view_, 1);
@@ -178,6 +185,9 @@ void MediaWindow::ConnectDecoder() {
             try {
               opened_ = true;
               duration_us_ = duration;
+              // 切档或续签恢复的位置也必须落在新输入的有效时间范围内。
+              if (duration_us_ > 0)
+                base_us_ = std::clamp<qint64>(base_us_, 0, std::max<qint64>(0, duration_us_ - 1000));
               audio_end_us_ = audio_end;
               silent_audio_ = false;
               if (has_audio) {
@@ -236,6 +246,33 @@ void MediaWindow::ConnectDecoder() {
           });
 }
 
+void MediaWindow::UpdateRenditions() {
+  quality_->clear();
+  for (const auto& item : source_.renditions) {
+    quality_->addItem(item.id, item.id);
+    if (item.id == source_.rendition) quality_->setCurrentIndex(quality_->count() - 1);
+  }
+  quality_->setVisible(source_.kind == MediaSource::Kind::Hls && !source_.renditions.isEmpty());
+}
+
+void MediaWindow::ChangeRendition(int index) {
+  if (awaiting_authorization_ || index < 0 || index >= source_.renditions.size()) return;
+  const auto item = source_.renditions[index];
+  if (item.id == source_.rendition) return;
+  const qint64 position = PositionUs();
+  const bool play = state_ == State::Playing || (state_ == State::Buffering && play_after_buffering_);
+  MediaSource selected = source_;
+  selected.rendition = item.id;
+  selected.location = item.location;
+  // 列表和分片共用凭证；过期时携带所选档位重新授权。
+  if (AuthorizationExpired()) {
+    selected.location.clear();
+    selected.headers.clear();
+    selected.expires_at_ms = 0;
+  }
+  OpenSource(std::move(selected), position, play);
+}
+
 void MediaWindow::ClearPending(qint64 position_us) {
   pictures_.clear();
   picture_bytes_ = 0;
@@ -265,6 +302,7 @@ void MediaWindow::OpenSource(MediaSource source, qint64 position_us, bool play_a
   audio_.Close();
   ClearPending(position_us);
   source_ = std::move(source);
+  UpdateRenditions();
   silent_audio_ = false;
   error_.clear();
   opened_ = false;
@@ -279,7 +317,7 @@ void MediaWindow::OpenSource(MediaSource source, qint64 position_us, bool play_a
   awaiting_authorization_ = source_.IsOnline() && source_.location.isEmpty();
   UpdateControls();
   if (awaiting_authorization_)
-    emit AuthorizationRequested(session_);
+    emit AuthorizationRequested(session_, source_.rendition);
   else
     emit OpenRequested(source_, session_);
 }
@@ -294,6 +332,7 @@ void MediaWindow::SetOnlineSource(quint64 session, MediaSource source, const QSt
     return;
   }
   source_ = std::move(source);
+  UpdateRenditions();
   UpdateControls();
   emit OpenRequested(source_, session_);
 }
@@ -552,6 +591,7 @@ void MediaWindow::UpdateControls() {
                                   position * 10000 / duration_us_, 0, 10000))
                             : 0);
     QString mode = source_.IsOnline() ? QStringLiteral("在线") : QStringLiteral("本地");
+    if (!source_.processing_notice.isEmpty()) mode += QStringLiteral(" · ") + source_.processing_notice;
     if (silent_audio_) mode += QStringLiteral(" · 无声播放（无音频设备）");
     const QString status = awaiting_authorization_ ? QStringLiteral("申请播放权限") :
         rebuffering_ ? QStringLiteral("网络缓冲中") : names[static_cast<int>(state_)];

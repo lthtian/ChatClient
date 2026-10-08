@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QUuid>
@@ -87,7 +88,11 @@ QNetworkRequest MediaTransfer::makeRequest(const QJsonObject& descriptor, const 
     const bool loopback = url.host() == "127.0.0.1" || url.host() == "localhost" || url.host() == "::1";
     // 学习环境只对明确配置的媒体地址允许公网 HTTP，其他地址仍要求 HTTPS。
     const QUrl mediaUrl(qEnvironmentVariable("CHAT_MEDIA_URL", "http://39.105.18.142/media"));
-    const bool allowedHttp = url.scheme() == "http" && (loopback || url == mediaUrl);
+    const bool hlsPath = QRegularExpression("^/media/hls/[0-9a-f]{32}/master\\.m3u8$").match(url.path()).hasMatch();
+    const bool sameOrigin = url.scheme() == mediaUrl.scheme() && url.host() == mediaUrl.host() &&
+                            url.port() == mediaUrl.port();
+    const bool allowedHttp = url.scheme() == "http" &&
+        (loopback || url == mediaUrl || (sameOrigin && hlsPath && !url.hasQuery()));
     const QString authorization = descriptor["headers"].toObject()["Authorization"].toString();
     if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() || url.hasFragment() ||
         !(url.scheme() == "https" || allowedHttp) || descriptor["method"].toString() != method ||
@@ -285,7 +290,7 @@ QString MediaTransfer::cachedVideoPath(const QJsonObject& media) const
 }
 
 void MediaTransfer::requestPlaybackSource(const QJsonObject& conversation, const QJsonObject& media,
-                                          SourceCompletion complete)
+                                          const QString& rendition, SourceCompletion complete)
 {
     const QString id = media["media_id"].toString();
     if (!isMp4(media["name"].toString()) || !QRegularExpression("^[0-9a-f]{32}$").match(id).hasMatch())
@@ -293,8 +298,8 @@ void MediaTransfer::requestPlaybackSource(const QJsonObject& conversation, const
         complete({}, QStringLiteral("请选择聊天中的 MP4 视频"));
         return;
     }
-    request("read", {{"conversation", conversation}, {"media_id", id}, {"variant", "original"}},
-            [this, name = media["name"].toString(), complete = std::move(complete)]
+    request("read", {{"conversation", conversation}, {"media_id", id}, {"variant", "playback"}},
+            [this, rendition, name = media["name"].toString(), complete = std::move(complete)]
             (const QJsonObject& data, const QString& error)
             {
                 if (!error.isEmpty()) { complete({}, error); return; }
@@ -305,9 +310,37 @@ void MediaTransfer::requestPlaybackSource(const QJsonObject& conversation, const
                     MediaSource source;
                     source.kind = MediaSource::Kind::Http;
                     source.name = name;
+                    const auto hls_state = data["hls_state"].toString();
+                    if (hls_state == "queued" || hls_state == "processing")
+                        source.processing_notice = QStringLiteral("原件播放 · 清晰度处理中，完成后重新打开可选");
+                    else if (hls_state == "failed")
+                        source.processing_notice = QStringLiteral("原件播放 · 清晰度处理失败");
                     source.location = QString::fromUtf8(request.url().toEncoded());
                     source.headers = "Authorization: " + request.rawHeader("Authorization") + "\r\n";
                     source.expires_at_ms = descriptor["expires_at"].toVariant().toLongLong();
+                    if (data["format"].toString() == "hls")
+                    {
+                        source.kind = MediaSource::Kind::Hls;
+                        const auto variants = data["variants"].toArray();
+                        if (variants.isEmpty() || variants.size() > 3)
+                            throw std::runtime_error("invalid HLS rendition list");
+                        for (const auto& value : variants)
+                        {
+                            const auto item = value.toObject();
+                            const auto id = item["id"].toString();
+                            const auto path = item["playlist"].toString();
+                            if (!QRegularExpression("^[0-9]{1,4}p$").match(id).hasMatch() ||
+                                path != id + "/index.m3u8" || item["height"].toInt() < 2 || item["width"].toInt() < 2)
+                                throw std::runtime_error("invalid HLS rendition");
+                            source.renditions.append({id, QString::fromUtf8(request.url().resolved(QUrl(path)).toEncoded()),
+                                                      item["width"].toInt(), item["height"].toInt()});
+                        }
+                        auto selected = source.renditions.front();
+                        for (const auto& item : source.renditions)
+                            if (item.id == rendition) selected = item;
+                        source.location = selected.location;
+                        source.rendition = selected.id;
+                    }
                     if (source.expires_at_ms <= QDateTime::currentMSecsSinceEpoch() + 1000)
                         throw std::runtime_error("playback credential expired");
                     complete(std::move(source), {});

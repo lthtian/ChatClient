@@ -78,16 +78,22 @@ void MediaDecoder::OpenInput(const MediaSource& source) {
     av_dict_set(&options, "request_size", "262144", 0);
     av_dict_set(&options, "short_seek_size", "262144", 0);
     av_dict_set(&options, "multiple_requests", "0", 0);
+    if (source.kind == MediaSource::Kind::Hls) {
+      // HLS 解封装器把 headers 继续传给子列表、初始化文件和分片。
+      av_dict_set(&options, "http_persistent", "0", 0);
+      av_dict_set(&options, "http_multiple", "0", 0);
+    }
     av_dict_set(&options, "probesize", "1048576", 0);
     av_dict_set(&options, "analyzeduration", "2000000", 0);
   }
   BeginIo();
   const int result = avformat_open_input(&raw, source.location.toUtf8().constData(),
-      online_ ? av_find_input_format("mov") : nullptr, &options);
+      online_ ? av_find_input_format(source.kind == MediaSource::Kind::Hls ? "hls" : "mov") : nullptr, &options);
   av_dict_free(&options);
   input_.reset(raw);
   Check(result, "avformat_open_input");
-  if (online_ && (!input_->pb || !(input_->pb->seekable & AVIO_SEEKABLE_NORMAL)))
+  // HLS 根据时间索引选分片，不通过 m3u8 的字节定位能力判断能否 seek。
+  if (source.kind == MediaSource::Kind::Http && (!input_->pb || !(input_->pb->seekable & AVIO_SEEKABLE_NORMAL)))
     throw std::runtime_error("服务端未提供可定位的 HTTP 视频输入");
 }
 
@@ -135,6 +141,18 @@ void MediaDecoder::Open(MediaSource source, quint64 session) {
     }
     // 两条轨道必须减去同一个起点，否则原有的声画起始偏移会被抹掉。
     origin_us_ = input_->start_time == AV_NOPTS_VALUE ? 0 : input_->start_time;
+    seek_origin_us_ = origin_us_;
+    if (source.kind == MediaSource::Kind::Hls) {
+      // 单档 HLS 的分片索引以首包 DTS 为起点，不能直接套用显示时间起点。
+      // 保留借读的包，避免正常起播时丢掉首个编码包。
+      BeginIo();
+      Check(av_read_frame(input_.get(), packet_.get()), "av_read_frame");
+      packet_pending_ = true;
+      if (packet_->dts == AV_NOPTS_VALUE)
+        throw std::runtime_error("HLS 首包缺少解码时间戳，无法确定定位起点");
+      seek_origin_us_ = av_rescale_q(packet_->dts,
+          input_->streams[packet_->stream_index]->time_base, kUs);
+    }
     const AVRational rate = av_guess_frame_rate(
         input_.get(), input_->streams[video_stream_->index], nullptr);
     frame_duration_us_ = rate.num > 0 && rate.den > 0
@@ -166,6 +184,7 @@ void MediaDecoder::SetOutputRate(int rate) { output_rate_ = rate; }
 
 void MediaDecoder::ResetDecodeState(qint64 target_us) {
   av_packet_unref(packet_.get());
+  packet_pending_ = false;
   av_frame_unref(frame_.get());
   av_frame_unref(rgb_.get());
   resampler_.reset();
@@ -184,7 +203,7 @@ void MediaDecoder::Seek(qint64 position_us, quint64 session) {
   try {
     if (!input_ || !video_) throw std::runtime_error("文件尚未打开");
     const int64_t timestamp =
-        av_rescale_q(position_us + origin_us_, kUs, video_stream_->time_base);
+        av_rescale_q(position_us + seek_origin_us_, kUs, video_stream_->time_base);
     // 向前找关键帧，再顺序解码到目标位置；直接跳到任意编码包会缺少参考图像。
     Check(av_seek_frame(input_.get(), video_stream_->index, timestamp,
                         AVSEEK_FLAG_BACKWARD),
@@ -234,7 +253,8 @@ void MediaDecoder::Read(quint64 session) {
     BeginIo();
     MediaBatch batch;
     if (!eof_) {
-      const int result = av_read_frame(input_.get(), packet_.get());
+      const int result = packet_pending_ ? 0 : av_read_frame(input_.get(), packet_.get());
+      packet_pending_ = false;
       if (result == AVERROR_EOF) {
         // 读完容器不等于播放完：先交出两条轨道及重采样器的尾部数据。
         Send(video_.get(), nullptr, true, batch);

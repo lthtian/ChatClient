@@ -92,10 +92,10 @@ void MainWindow::playOnlineVideo(const QJsonObject& conversation, const QJsonObj
     // 切换视频时替换消息绑定；播放器只发出授权请求，不认识 media_id 或聊天连接。
     disconnect(player, &MediaWindow::AuthorizationRequested, this, nullptr);
     connect(player, &MediaWindow::AuthorizationRequested, this,
-            [this, conversation, media](quint64 session)
+            [this, conversation, media](quint64 session, const QString& rendition)
             {
                 const QPointer<MediaWindow> target = player_;
-                media_->requestPlaybackSource(conversation, media,
+                media_->requestPlaybackSource(conversation, media, rendition,
                     [target, session](MediaSource source, const QString& error)
                     {
                         // 关闭窗口和更换视频期间，旧授权返回不能打开错误的视频。
