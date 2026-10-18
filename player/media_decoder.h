@@ -49,6 +49,7 @@ class MediaDecoder : public QObject {
 
  public slots:
   void Open(MediaSource source, quint64 session);  // 按输入类型打开，再共用轨道探测和解码。
+  void Close(quint64 session); // 直播暂停/重连在解码线程释放输入，停止上游连接。
   void SetAudioEnabled(bool enabled);  // 无输出设备时跳过音轨，只解码视频。
   void SetOutputRate(int rate);  // 设置设备选定的输出采样率，先于第一次 Read。
   void Read(
@@ -116,5 +117,6 @@ class MediaDecoder : public QObject {
   bool decode_audio_ = true;   // GUI 协商设备后决定是否消费音轨编码包。
   bool audio_started_ = false;  // 是否已建立音频时间起点。
   bool eof_ = false;            // 是否已完成文件及转换器排空。
+  bool live_ = false;           // 直播以本次实际解码起点归零，重连不继承点播位置。
 };
 #endif  // VIDEO_PLAYER_MEDIA_DECODER_H_

@@ -37,6 +37,8 @@ class MediaTransfer : public QObject
     void requestPlaybackSource(const QJsonObject& conversation, const QJsonObject& media,
                                const QString& rendition, SourceCompletion complete);  // 在线授权；保留档位，不写本地缓存。
     void cancel();                                            // 取消尚未进入发布阶段的传输。
+    void requestLiveSource(const QJsonObject& conversation, const QJsonObject& live,
+                           const QString& format, SourceCompletion complete); // 申请直播源，不执行本地文件下载。
     bool busy() const { return busy_; }                       // 本模块一次只运行一个文件任务。
 
    signals:

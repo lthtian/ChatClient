@@ -13,10 +13,12 @@
 #include "media_transfer.h"
 #include "media_window.h"
 #include "public.h"
+#include "desktop_broadcast.h"
 
 void MainWindow::setupMedia()
 {
     media_ = new MediaTransfer(tcpclient, this);
+    setupLive();
     transferProgress_ = new QProgressDialog(this);
     transferProgress_->setWindowTitle(QStringLiteral("视频文件传输"));
     transferProgress_->setAutoClose(true);
@@ -69,6 +71,7 @@ void MainWindow::setupMedia()
             [this](const QString& path)
             {
                 // 本地入口使用通过完整下载和摘要校验的文件路径。
+                watchingLiveId_.clear();
                 ensurePlayer()->OpenFile(path);
             });
 }
@@ -88,6 +91,7 @@ MediaWindow* MainWindow::ensurePlayer()
 
 void MainWindow::playOnlineVideo(const QJsonObject& conversation, const QJsonObject& media)
 {
+    watchingLiveId_.clear();
     auto* player = ensurePlayer();
     // 切换视频时替换消息绑定；播放器只发出授权请求，不认识 media_id 或聊天连接。
     disconnect(player, &MediaWindow::AuthorizationRequested, this, nullptr);
@@ -212,12 +216,14 @@ void MainWindow::handleMediaMessage(const QJsonObject& conversation, const QJson
         }
         return;
     }
-    if (historyLoading_ && message["kind"].toString() == "file")
+    if (historyLoading_ && (message["kind"].toString() == "file" || message["kind"].toString() == "live"))
     {
         pendingMedia_.append(message);
         return;
     }
-    if (message["kind"].toString() == "file")
+    if (message["kind"].toString() == "live")
+        appendLiveMessage(conversation, message);
+    else if (message["kind"].toString() == "file")
         appendVideoMessage(conversation, message);
     else
     {
@@ -309,6 +315,15 @@ void MainWindow::appendVideoMessage(const QJsonObject& conversation, const QJson
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    if (broadcast_ && broadcast_->Busy() && tcpclient->getSocket() &&
+        tcpclient->getSocket()->state() == QAbstractSocket::ConnectedState) {
+        // 等服务端确认结束后再断开登录；关闭过程中的票据仍绑定这条连接。
+        connect(broadcast_, &QObject::destroyed, this, &QWidget::close, Qt::UniqueConnection);
+        broadcast_->close();
+        event->ignore();
+        return;
+    }
+    if (broadcast_) delete broadcast_.data();
     // 关闭播放和未完成的传输；已校验的缓存文件继续保留。
     if (player_) delete player_.data();
     media_->cancel();

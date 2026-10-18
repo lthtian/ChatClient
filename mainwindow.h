@@ -27,6 +27,7 @@ class MediaTransfer;
 class MediaWindow;
 class QProgressDialog;
 class QCloseEvent;
+class DesktopBroadcast;
 
 struct node{
     int y, m, d;
@@ -76,6 +77,7 @@ private:
     MyTextEdit *messageInput;   // 用于输入消息
     QPushButton *sendButton;   // 用于发送消息
     QPushButton* videoButton; // 选择并上传 MP4 的入口。
+    QPushButton* liveButton; // 为当前聊天打开桌面直播控制窗口。
     MyListWidget* contactList;
     QPushButton* addFriend;
     QPushButton* addGroup;
@@ -119,6 +121,12 @@ private:
     void handleMediaMessage(const QJsonObject& conversation, const QJsonObject& message); // 实时通知与发送确认共用入口。
     void appendVideoMessage(const QJsonObject& conversation, const QJsonObject& message); // 显示文件名、大小及下载播放按钮。
     void showMediaHistory(const QJsonObject& conversation); // 将已收齐的记录交给消息展示。
+    void setupLive(); // 连接创建入口和有界状态刷新。
+    void createLive(); // 在当前聊天创建直播卡片。
+    void openDesktopBroadcast(const QJsonObject& conversation, const QJsonObject& live = {}); // 绑定会话、申请开播和结束，媒体由客户端内部发布。
+    void appendLiveMessage(const QJsonObject& conversation, const QJsonObject& message); // 创建带状态和观看按钮的卡片。
+    void handleLiveState(const QJsonObject& conversation, const QJsonObject& live); // 回调推送和状态查询共用更新路径。
+    void watchLive(const QJsonObject& conversation, const QJsonObject& live, const QString& format); // 绑定直播授权，复用播放器。
 
     MediaTransfer* media_ = nullptr; // 拥有控制请求及单个文件传输任务。
     QProgressDialog* transferProgress_ = nullptr; // 上传下载的进度和取消入口。
@@ -128,6 +136,9 @@ private:
     QJsonArray pendingMedia_; // 历史查询期间到达的实时媒体消息，历史展示后再追加。
     bool historyLoading_ = false; // 是否正在加载当前会话历史。
     quint64 historyGeneration_ = 0; // 切换会话时拒收此前的历史查询结果。
+    QString watchingLiveId_; // 当前播放器绑定的直播，防止其他卡片状态结束当前流。
+    QJsonObject watchingConversation_; // 观看期间切换聊天也保留授权会话。
+    QPointer<DesktopBroadcast> broadcast_; // 单个桌面直播控制窗口，关闭后自动置空。
 
     // 消息处理方法（由 recvHandler 分发）
     void handleInitMsgAck(const QJsonObject& jsonObj);

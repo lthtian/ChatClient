@@ -82,6 +82,11 @@ MediaWindow::MediaWindow()
   timer_.setInterval(10);
   timer_.setTimerType(Qt::PreciseTimer);
   connect(&timer_, &QTimer::timeout, this, &MediaWindow::Tick);
+  reconnect_timer_.setSingleShot(true);
+  connect(&reconnect_timer_, &QTimer::timeout, this, [this] {
+    if (source_.IsLive() && !live_ended_ && state_ == State::Buffering)
+      RefreshAuthorization(0, true);
+  });
   thread_.start();
   UpdateControls();
 }
@@ -170,6 +175,7 @@ void MediaWindow::ConnectDecoder() {
   // 显式排队连接保证槽函数在 decoder_ 所属线程执行。
   connect(this, &MediaWindow::OpenRequested, decoder_, &MediaDecoder::Open,
           Qt::QueuedConnection);
+  connect(this, &MediaWindow::CloseRequested, decoder_, &MediaDecoder::Close, Qt::QueuedConnection);
   connect(this, &MediaWindow::AudioEnabledRequested, decoder_,
           &MediaDecoder::SetAudioEnabled, Qt::QueuedConnection);
   connect(this, &MediaWindow::OutputRateRequested, decoder_,
@@ -205,7 +211,7 @@ void MediaWindow::ConnectDecoder() {
                 status_->setToolTip(
                     QString::fromUtf8("此文件没有音轨，使用单调时钟"));
               // 重新授权后是重新打开容器，要先恢复媒体位置再继续送包。
-              if (base_us_ > 0) {
+              if (!source_.IsLive() && base_us_ > 0) {
                 in_flight_ = true;
                 emit SeekRequested(base_us_, session_);
               } else {
@@ -228,6 +234,10 @@ void MediaWindow::ConnectDecoder() {
             in_flight_ = false;
             try {
               AcceptBatch(std::move(batch));
+              if (source_.IsLive() && eof_) {
+                Fail(QStringLiteral("直播连接已断开"));
+                return;
+              }
               TryStart();
               Tick();
               RequestData();
@@ -295,7 +305,38 @@ void MediaWindow::OpenOnline(const QString& name) {
   OpenSource(std::move(source), 0, true);
 }
 
+void MediaWindow::OpenLive(const QString& name, bool hls) {
+  reconnect_attempts_ = 0;
+  live_ended_ = false;
+  MediaSource source;
+  source.kind = hls ? MediaSource::Kind::LiveHls : MediaSource::Kind::LiveFlv;
+  source.name = name;
+  OpenSource(std::move(source), 0, true);
+}
+
+void MediaWindow::SetLiveState(const QString& state) {
+  if (!source_.IsLive()) return;
+  if (state == "interrupted" && (state_ == State::Playing || (state_ == State::Buffering && opened_))) {
+    // 发布会话已经断开，关闭旧时间线；重推可能从零开始，必须重新建立共同起点。
+    Fail(QStringLiteral("推流暂时中断"));
+    return;
+  }
+  if (state != "ended") return;
+  live_ended_ = true;
+  reconnect_timer_.stop();
+  ++session_;
+  decoder_->RequestSession(session_);
+  emit CloseRequested(session_);
+  timer_.stop();
+  audio_.Close();
+  ClearPending(0);
+  opened_ = awaiting_authorization_ = false;
+  state_ = State::Ended;
+  UpdateControls();
+}
+
 void MediaWindow::OpenSource(MediaSource source, qint64 position_us, bool play_after) {
+  reconnect_timer_.stop();
   ++session_;
   decoder_->RequestSession(session_);
   timer_.stop();
@@ -325,7 +366,11 @@ void MediaWindow::OpenSource(MediaSource source, qint64 position_us, bool play_a
 void MediaWindow::SetOnlineSource(quint64 session, MediaSource source, const QString& error) {
   if (session != session_ || !awaiting_authorization_) return;
   awaiting_authorization_ = false;
-  if (!error.isEmpty()) { Fail(error); return; }
+  if (!error.isEmpty()) {
+    if (source_.IsLive() && error == "live_ended") SetLiveState("ended");
+    else Fail(error);
+    return;
+  }
   if (!source.IsOnline() || source.location.isEmpty() || source.headers.isEmpty() ||
       source.expires_at_ms <= QDateTime::currentMSecsSinceEpoch() + 1000) {
     Fail(QStringLiteral("无效或已过期的在线播放凭证"));
@@ -347,7 +392,7 @@ void MediaWindow::RefreshAuthorization(qint64 position_us, bool play_after) {
   source.location.clear();
   source.headers.clear();
   source.expires_at_ms = 0;
-  OpenSource(std::move(source), position_us, play_after);
+  OpenSource(std::move(source), source_.IsLive() ? 0 : position_us, play_after);
 }
 
 void MediaWindow::AcceptBatch(MediaBatch batch) {
@@ -360,6 +405,14 @@ void MediaWindow::AcceptBatch(MediaBatch batch) {
   for (auto& block : batch.audio) audio_.Append(std::move(block));
   eof_ = batch.eof;
 }
+qint64 MediaWindow::BufferAheadUs(qint64 requested_us) const {
+  if (pictures_.empty()) return std::min<qint64>(requested_us, 150000);
+  const auto& picture = pictures_.back();
+  const qint64 bytes = std::max<qint64>(1, picture.image.sizeInBytes());
+  // 解复用会同时推进音视频；音频预读也要为随之读出的 RGB 帧预留空间。
+  const qint64 frames = std::max<qint64>(1, 32 * 1024 * 1024 / bytes - 2);
+  return std::min(requested_us, frames * std::max<qint64>(1, picture.duration_us));
+}
 void MediaWindow::RequestData() {
   if (!opened_ || in_flight_ || eof_ ||
       (state_ != State::Buffering && state_ != State::Playing))
@@ -369,7 +422,7 @@ void MediaWindow::RequestData() {
     RefreshAuthorization(position, state_ == State::Playing || play_after_buffering_);
     return;
   }
-  const qint64 ahead = source_.IsOnline() ? 1000000 : 150000;
+  const qint64 ahead = BufferAheadUs(source_.IsOnline() ? 1000000 : 150000);
   const bool need_video = pictures_.empty() ||
       (pictures_.back().pts_us < position + ahead && picture_bytes_ < 32 * 1024 * 1024);
   const bool need_audio =
@@ -386,8 +439,8 @@ void MediaWindow::TryStart() {
     if (eof_) throw std::runtime_error("定位后没有可显示的画面");
     return;
   }
-  // 在线起播/重缓冲目标为 500ms；高分辨率视频先达到内存高水位也可起播。
-  const qint64 ready_us = source_.IsOnline() ? 500000 : 100000;
+  // 起播和持续预读共用内存预算，避免等待音频时超过视频缓存上限。
+  const qint64 ready_us = BufferAheadUs(source_.IsOnline() ? 500000 : 100000);
   const bool video_ready = !source_.IsOnline() || !play_after_buffering_ || eof_ ||
       picture_bytes_ >= 32 * 1024 * 1024 ||
       (!pictures_.empty() && pictures_.back().pts_us + pictures_.back().duration_us >= base_us_ + ready_us);
@@ -398,6 +451,7 @@ void MediaWindow::TryStart() {
   audio_clock_ =
       audio_.IsOpen() && (audio_end_us_ < 0 || base_us_ < audio_end_us_);
   state_ = play_after_buffering_ ? State::Playing : State::Paused;
+  if (source_.IsLive() && play_after_buffering_) reconnect_attempts_ = 0;
   if (play_after_buffering_) {
     audio_.Resume();
     clock_.start();
@@ -483,6 +537,7 @@ void MediaWindow::SeekTo(qint64 position_us) {
                 (state_ == State::Buffering && play_after_buffering_));
 }
 void MediaWindow::StartSeek(qint64 position_us, bool play_after) {
+  if (source_.IsLive()) return;
   if (!opened_ || state_ == State::Error) return;
   const qint64 target = std::clamp<qint64>(
       position_us, 0, std::max<qint64>(0, duration_us_ - 1000));
@@ -508,6 +563,26 @@ void MediaWindow::StartSeek(qint64 position_us, bool play_after) {
   }
 }
 void MediaWindow::TogglePlayback() {
+  if (source_.IsLive()) {
+    if (live_ended_) return;
+    if (state_ == State::Playing || state_ == State::Buffering) {
+      // 直播暂停直接中断接收，不积累过时音视频；恢复时重新申请入口加入当前流。
+      reconnect_timer_.stop();
+      ++session_;
+      decoder_->RequestSession(session_);
+      emit CloseRequested(session_);
+      timer_.stop();
+      audio_.Close();
+      ClearPending(0);
+      opened_ = awaiting_authorization_ = false;
+      state_ = State::Paused;
+      UpdateControls();
+    } else {
+      reconnect_attempts_ = 0;
+      RefreshAuthorization(0, true);
+    }
+    return;
+  }
   if (state_ == State::Playing) {
     base_us_ = PositionUs();
     audio_.Pause();
@@ -534,8 +609,11 @@ void MediaWindow::TogglePlayback() {
 void MediaWindow::Stop() {
   if (state_ == State::Empty) return;
   try {
+    reconnect_timer_.stop();
+    if (source_.IsLive()) opened_ = false;
     ++session_;
     decoder_->RequestSession(session_);
+    if (source_.IsLive()) emit CloseRequested(session_);
     awaiting_authorization_ = rebuffering_ = false;
     timer_.stop();
     ClearPending(0);
@@ -549,9 +627,11 @@ void MediaWindow::Stop() {
   }
 }
 void MediaWindow::Fail(const QString& message) {
+  if (RetryLive(message)) return;
   base_us_ = PositionUs();
   ++session_;
   decoder_->RequestSession(session_);
+  if (source_.IsLive()) emit CloseRequested(session_);
   awaiting_authorization_ = false;
   state_ = State::Error;
   error_ = message;
@@ -560,6 +640,24 @@ void MediaWindow::Fail(const QString& message) {
   pictures_.clear();
   picture_bytes_ = 0;
   UpdateControls();
+}
+
+bool MediaWindow::RetryLive(const QString& message) {
+  if (!source_.IsLive() || live_ended_ || state_ == State::Paused || state_ == State::Stopped ||
+      reconnect_attempts_ >= 5) return false;
+  ++session_;
+  decoder_->RequestSession(session_);
+  emit CloseRequested(session_);
+  timer_.stop();
+  audio_.Close();
+  ClearPending(0);
+  opened_ = awaiting_authorization_ = false;
+  state_ = State::Buffering;
+  play_after_buffering_ = true;
+  error_ = message;
+  reconnect_timer_.start(std::min(5000, 500 * (1 << reconnect_attempts_++)));
+  UpdateControls();
+  return true;
 }
 void MediaWindow::ToggleFullscreen() {
   if (isFullScreen())
@@ -571,6 +669,12 @@ void MediaWindow::UpdateControls() {
   play_button_->setEnabled(state_ != State::Empty && state_ != State::Error);
   stop_button_->setEnabled(state_ != State::Empty && state_ != State::Error);
   progress_->setEnabled(opened_ && duration_us_ > 0 && state_ != State::Error);
+  progress_->setVisible(!source_.IsLive());
+  if (source_.IsLive() && live_ended_) {
+    play_button_->setEnabled(false);
+    status_->setText(QStringLiteral("直播已结束"));
+    return;
+  }
   const bool playing = state_ == State::Playing ||
                        (state_ == State::Buffering && play_after_buffering_);
   play_button_->setText(playing ? QString::fromUtf8("暂停")
@@ -591,11 +695,13 @@ void MediaWindow::UpdateControls() {
                                   position * 10000 / duration_us_, 0, 10000))
                             : 0);
     QString mode = source_.IsOnline() ? QStringLiteral("在线") : QStringLiteral("本地");
+    if (source_.IsLive()) mode = QStringLiteral("直播");
     if (!source_.processing_notice.isEmpty()) mode += QStringLiteral(" · ") + source_.processing_notice;
     if (silent_audio_) mode += QStringLiteral(" · 无声播放（无音频设备）");
     const QString status = awaiting_authorization_ ? QStringLiteral("申请播放权限") :
         rebuffering_ ? QStringLiteral("网络缓冲中") : names[static_cast<int>(state_)];
-    status_->setText(mode + " · " + status + " · " +
-                     TimeText(position) + " / " + TimeText(duration_us_));
+    status_->setText(mode + " · " + status + (source_.IsLive() ?
+        (reconnect_timer_.isActive() ? QStringLiteral(" · 正在重连 %1/5：%2").arg(reconnect_attempts_).arg(error_) : QString()) :
+        " · " + TimeText(position) + " / " + TimeText(duration_us_)));
   }
 }

@@ -15,11 +15,13 @@
 #include <QDialog>
 #include <QLabel>
 #include <QMessageBox>
+#include <QSignalBlocker>
 #include <QEvent>
 #include "qnchatmessage.h"
 #include <QTimer>
 #include "media_transfer.h"
 #include "media_window.h"
+#include "desktop_broadcast.h"
 
 MainWindow::MainWindow(QWidget *parent, MyTcpClient* tc)
     : QMainWindow(parent), tcpclient(tc)
@@ -36,6 +38,7 @@ MainWindow::MainWindow(QWidget *parent, MyTcpClient* tc)
 
 MainWindow::~MainWindow()
 {
+    if (broadcast_) delete broadcast_.data();
     if (player_) delete player_.data();
 }
 
@@ -143,6 +146,10 @@ void MainWindow::setupUI()
     videoButton->setObjectName("sendVideoButton");
     videoButton->setFixedHeight(36);
     bLayout->addWidget(videoButton);
+    liveButton = new QPushButton(QStringLiteral("创建直播"), this);
+    liveButton->setObjectName("createLiveButton");
+    liveButton->setFixedHeight(36);
+    bLayout->addWidget(liveButton);
     bLayout->addStretch();  // 将发送按钮推到右侧
     bLayout->addWidget(sendButton);
 
@@ -384,6 +391,7 @@ void MainWindow::recvHandler()
         switch (msgid) {
         case MediaResponse:    media_->handleResponse(jsonObj); break;
         case MediaMessage:     handleMediaMessage(jsonObj["conversation"].toObject(), jsonObj["message"].toObject()); break;
+        case 29:               handleLiveState(jsonObj["conversation"].toObject(), jsonObj["live"].toObject()); break;
         case InitMsgAck:        handleInitMsgAck(jsonObj); break;
         case OTOMsg:
         case GroupChatMsg:      handleChatMsg(msgid, jsonObj); break;
@@ -599,6 +607,10 @@ void MainWindow::handleHistoryMsgAck(const QJsonObject& jsonObj)
                 QString msgtime = historyObj["time"].toString();
                 QString name = historyObj["name"].toString();
 
+                if (historyObj["kind"].toString() == "live") {
+                    appendLiveMessage(currentConversation(), historyObj["record"].toObject());
+                    continue;
+                }
                 if (historyObj["kind"].toString() == "file") {
                     appendVideoMessage(currentConversation(), historyObj["record"].toObject());
                     continue;
@@ -674,9 +686,13 @@ void MainWindow::handleNewMsgAck(const QJsonObject& jsonObj)
     else if(cnt > 0)
     {
         contactList->setItemValue(mp[name], cnt);
+        // 排序不改变正在查看的会话；屏蔽临时移除造成的选择信号，避免取消历史请求。
+        auto* current = contactList->currentItem();
+        const QSignalBlocker selection(contactList);
         int row = contactList->row(mp[name]);
         QListWidgetItem* takenItem = contactList->takeItem(row); // 移除item
         contactList->insertItem(0, takenItem); // 插入到顶部(第0行)
+        contactList->setCurrentItem(current);
     }
 }
 

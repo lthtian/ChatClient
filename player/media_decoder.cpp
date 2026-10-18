@@ -62,6 +62,7 @@ void MediaDecoder::BeginIo() {
 
 void MediaDecoder::OpenInput(const MediaSource& source) {
   online_ = source.IsOnline();
+  live_ = source.IsLive();
   if (!online_ && !QFileInfo(source.location).isFile())
     throw std::runtime_error("请选择存在的本地视频文件");
   AVFormatContext* raw = avformat_alloc_context();
@@ -78,17 +79,19 @@ void MediaDecoder::OpenInput(const MediaSource& source) {
     av_dict_set(&options, "request_size", "262144", 0);
     av_dict_set(&options, "short_seek_size", "262144", 0);
     av_dict_set(&options, "multiple_requests", "0", 0);
-    if (source.kind == MediaSource::Kind::Hls) {
+    if (source.IsHls()) {
       // HLS 解封装器把 headers 继续传给子列表、初始化文件和分片。
       av_dict_set(&options, "http_persistent", "0", 0);
       av_dict_set(&options, "http_multiple", "0", 0);
+      if (live_) av_dict_set(&options, "live_start_index", "-1", 0);
     }
     av_dict_set(&options, "probesize", "1048576", 0);
     av_dict_set(&options, "analyzeduration", "2000000", 0);
   }
   BeginIo();
   const int result = avformat_open_input(&raw, source.location.toUtf8().constData(),
-      online_ ? av_find_input_format(source.kind == MediaSource::Kind::Hls ? "hls" : "mov") : nullptr, &options);
+      online_ ? av_find_input_format(source.IsHls() ? "hls" :
+          source.kind == MediaSource::Kind::LiveFlv ? "flv" : "mov") : nullptr, &options);
   av_dict_free(&options);
   input_.reset(raw);
   Check(result, "avformat_open_input");
@@ -158,9 +161,9 @@ void MediaDecoder::Open(MediaSource source, quint64 session) {
     frame_duration_us_ = rate.num > 0 && rate.den > 0
                              ? av_rescale_q(1, av_inv_q(rate), kUs)
                              : 40000;
-    qint64 duration = input_->duration == AV_NOPTS_VALUE ? 0 : input_->duration;
+    qint64 duration = live_ || input_->duration == AV_NOPTS_VALUE ? 0 : input_->duration;
     qint64 audio_end = -1;
-    if (audio_stream_ && audio_stream_->duration != AV_NOPTS_VALUE) {
+    if (!live_ && audio_stream_ && audio_stream_->duration != AV_NOPTS_VALUE) {
       const qint64 start = audio_stream_->start_time == AV_NOPTS_VALUE
                                ? 0
                                : av_rescale_q(audio_stream_->start_time,
@@ -169,6 +172,8 @@ void MediaDecoder::Open(MediaSource source, quint64 session) {
       audio_end = start + av_rescale_q(audio_stream_->duration,
                                        audio_stream_->time_base, kUs);
     }
+    // 直播可能从非零时刻的 GOP 加入。第一份解码输出建立两轨共同起点，不能等待过去的时间。
+    if (live_) origin_us_ = AV_NOPTS_VALUE;
     scaler_->flags = SWS_BILINEAR;
     scaler_->threads = 1;
     emit Opened(session_, std::max<qint64>(0, duration), audio_ != nullptr,
@@ -176,6 +181,16 @@ void MediaDecoder::Open(MediaSource source, quint64 session) {
   } catch (const std::exception& e) {
     if (!Canceled()) emit Failed(session_, QString::fromUtf8(e.what()));
   }
+}
+
+void MediaDecoder::Close(quint64 session) {
+  if (session != requested_session_.load(std::memory_order_relaxed)) return;
+  session_ = session;
+  av_packet_unref(packet_.get());
+  video_.reset();
+  audio_.reset();
+  input_.reset();
+  video_stream_ = audio_stream_ = nullptr;
 }
 
 void MediaDecoder::SetAudioEnabled(bool enabled) { decode_audio_ = enabled; }
@@ -202,6 +217,7 @@ void MediaDecoder::Seek(qint64 position_us, quint64 session) {
   BeginIo();
   try {
     if (!input_ || !video_) throw std::runtime_error("文件尚未打开");
+    if (live_) throw std::runtime_error("直播不支持点播定位");
     const int64_t timestamp =
         av_rescale_q(position_us + seek_origin_us_, kUs, video_stream_->time_base);
     // 向前找关键帧，再顺序解码到目标位置；直接跳到任意编码包会缺少参考图像。
@@ -236,6 +252,11 @@ int MediaDecoder::Receive(AVCodecContext* codec, bool video,
     const int result = avcodec_receive_frame(codec, frame_.get());
     if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return result;
     Check(result, "avcodec_receive_frame");
+    if (live_ && origin_us_ == AV_NOPTS_VALUE) {
+      const auto* stream = video ? video_stream_ : audio_stream_;
+      origin_us_ = frame_->best_effort_timestamp == AV_NOPTS_VALUE ? 0 :
+          av_rescale_q(frame_->best_effort_timestamp, stream->time_base, kUs);
+    }
     if (video)
       ConvertVideo(batch);
     else {
@@ -337,6 +358,18 @@ void MediaDecoder::PrepareAudio() {
 }
 
 int MediaDecoder::ConvertAudio(const AVFrame* source, MediaBatch& batch) {
+  if (source && audio_started_ && source->best_effort_timestamp != AV_NOPTS_VALUE) {
+    const qint64 actual = av_rescale_q(source->best_effort_timestamp, audio_stream_->time_base, kUs) - origin_us_;
+    const qint64 expected = audio_origin_us_ + av_rescale_q(
+        audio_samples_ + swr_get_delay(resampler_.get(), output_rate_), AVRational{1, output_rate_}, kUs);
+    if (std::abs(actual - expected) > 100000) {
+      // 分片丢失后 PCM 不能按采样数拼接掉时间空隙，否则音频时钟会永久落后视频。
+      while (ConvertAudio(nullptr, batch) > 0) {}
+      swr_close(resampler_.get());
+      Check(swr_init(resampler_.get()), "swr_init");
+      audio_started_ = false;
+    }
+  }
   if (source && !audio_started_) {
     audio_origin_us_ = source->best_effort_timestamp == AV_NOPTS_VALUE
                            ? target_us_
@@ -344,6 +377,7 @@ int MediaDecoder::ConvertAudio(const AVFrame* source, MediaBatch& batch) {
                                           audio_stream_->time_base, kUs) -
                                  origin_us_;
     audio_started_ = true;
+    audio_samples_ = 0;
   }
   const int bound =
       swr_get_out_samples(resampler_.get(), source ? source->nb_samples : 0);

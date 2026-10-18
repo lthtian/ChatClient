@@ -39,6 +39,8 @@ class MediaWindow : public QWidget {
   ~MediaWindow() override;  // 停设备、请求中断、退出并等待工作线程。
   void OpenFile(const QString& filename);  // 本地入口：直接打开已下载文件。
   void OpenOnline(const QString& name);    // 在线入口：先向聊天模块申请读取凭证。
+  void OpenLive(const QString& name, bool hls);  // 直播入口：授权后从当前流加入，不 seek。
+  void SetLiveState(const QString& state);  // 断流时重新加入；结束时关闭接收并停止重连。
   void SetOnlineSource(quint64 session, MediaSource source, const QString& error);
   // 上述回调只接受当前授权请求；聊天模块负责提供地址、头和到期时间。
   bool IsOnline() const { return source_.IsOnline(); }  // 当前输入是否来自网络。
@@ -57,6 +59,7 @@ class MediaWindow : public QWidget {
  signals:
   void OpenRequested(MediaSource source,
                      quint64 session);  // 将输入描述复制给工作线程。
+  void CloseRequested(quint64 session); // 取消后在工作线程关闭直播输入。
   void AuthorizationRequested(quint64 session, QString rendition);  // 初次/过期时申请整套授权并保留档位。
   void AudioEnabledRequested(bool enabled);  // 无设备时通知后台跳过音轨，避免 PCM 堆积。
   void OutputRateRequested(int rate);   // 把设备采样率交给后台重采样器。
@@ -77,10 +80,12 @@ class MediaWindow : public QWidget {
   void StartSeek(qint64 position_us,
                  bool play_after);     // 清 GUI/设备状态并发起定位。
   void AcceptBatch(MediaBatch batch);  // 接收拥有独立内存的结果并检查缓存上限。
+  qint64 BufferAheadUs(qint64 requested_us) const; // 按单帧内存计算音视频共同的预读时间上限。
   void RequestData();                  // 在媒体准备不足且无在途请求时继续读包。
   void TryStart();  // 首批数据准备好后开始播放或显示暂停预览。
   void Tick();      // 补音频、读取时钟、选择到期画面并检查结束。
   void Fail(const QString& message);  // 清理播放资源并显示错误，允许重新打开。
+  bool RetryLive(const QString& message);  // 最多五次退避重连；暂停、停止和结束时取消。
   void ClearPending(qint64 position_us);  // 清缓存和本次时钟，设置定位目标。
   void UpdateControls();    // 根据状态更新时间、按钮及非拖动中的进度条。
   void ToggleFullscreen();  // 在普通窗口与全屏间切换。
@@ -117,5 +122,8 @@ class MediaWindow : public QWidget {
   bool resume_after_drag_ = false;     // 拖动前是否播放，释放后恢复相同状态。
   bool silent_audio_ = false;          // 文件有音轨但无输出设备，界面说明无声播放。
   bool audio_clock_ = false;           // 是否正在使用设备消费进度作为主时钟。
+  QTimer reconnect_timer_;             // 直播重连等待，不阻塞 GUI。
+  int reconnect_attempts_ = 0;         // 连续失败次数，实际起播后清零。
+  bool live_ended_ = false;            // 业务已结束后禁止重连。
 };
 #endif  // VIDEO_PLAYER_MEDIA_WINDOW_H_

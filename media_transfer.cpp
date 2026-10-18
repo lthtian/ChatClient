@@ -89,10 +89,13 @@ QNetworkRequest MediaTransfer::makeRequest(const QJsonObject& descriptor, const 
     // 学习环境只对明确配置的媒体地址允许公网 HTTP，其他地址仍要求 HTTPS。
     const QUrl mediaUrl(qEnvironmentVariable("CHAT_MEDIA_URL", "http://39.105.18.142/media"));
     const bool hlsPath = QRegularExpression("^/media/hls/[0-9a-f]{32}/master\\.m3u8$").match(url.path()).hasMatch();
+    const QUrl liveUrl(qEnvironmentVariable("CHAT_LIVE_URL", "http://39.105.18.142/live"));
+    const bool livePath = QRegularExpression("^/live/[0-9a-f]{32}\\.(flv|m3u8)$").match(url.path()).hasMatch() &&
+        url.scheme() == liveUrl.scheme() && url.host() == liveUrl.host() && url.port() == liveUrl.port();
     const bool sameOrigin = url.scheme() == mediaUrl.scheme() && url.host() == mediaUrl.host() &&
                             url.port() == mediaUrl.port();
     const bool allowedHttp = url.scheme() == "http" &&
-        (loopback || url == mediaUrl || (sameOrigin && hlsPath && !url.hasQuery()));
+        (loopback || url == mediaUrl || (((sameOrigin && hlsPath) || livePath) && !url.hasQuery()));
     const QString authorization = descriptor["headers"].toObject()["Authorization"].toString();
     if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() || url.hasFragment() ||
         !(url.scheme() == "https" || allowedHttp) || descriptor["method"].toString() != method ||
