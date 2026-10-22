@@ -22,6 +22,7 @@
 #include "media_transfer.h"
 #include "media_window.h"
 #include "desktop_broadcast.h"
+#include "camera_window.h"
 
 MainWindow::MainWindow(QWidget *parent, MyTcpClient* tc)
     : QMainWindow(parent), tcpclient(tc)
@@ -38,6 +39,8 @@ MainWindow::MainWindow(QWidget *parent, MyTcpClient* tc)
 
 MainWindow::~MainWindow()
 {
+    if (cameraPublisher_) delete cameraPublisher_.data();
+    if (cameraViewer_) delete cameraViewer_.data();
     if (broadcast_) delete broadcast_.data();
     if (player_) delete player_.data();
 }

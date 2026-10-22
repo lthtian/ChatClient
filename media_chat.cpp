@@ -14,6 +14,7 @@
 #include "media_window.h"
 #include "public.h"
 #include "desktop_broadcast.h"
+#include "camera_window.h"
 
 void MainWindow::setupMedia()
 {
@@ -315,6 +316,11 @@ void MainWindow::appendVideoMessage(const QJsonObject& conversation, const QJson
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    for (auto window : {cameraPublisher_, cameraViewer_}) {
+        if (!window || !window->Busy()) continue;
+        connect(window, &QObject::destroyed, this, &QWidget::close, Qt::UniqueConnection);
+        window->close(); event->ignore(); return;
+    }
     if (broadcast_ && broadcast_->Busy() && tcpclient->getSocket() &&
         tcpclient->getSocket()->state() == QAbstractSocket::ConnectedState) {
         // 等服务端确认结束后再断开登录；关闭过程中的票据仍绑定这条连接。

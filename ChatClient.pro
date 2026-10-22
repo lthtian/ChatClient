@@ -7,6 +7,7 @@ CONFIG += c++17
 # 客户端播放器模块。
 include($$PWD/player/media_playback.pri)
 include($$PWD/broadcast/desktop_broadcast.pri)
+include($$PWD/rtc/camera_rtc.pri)
 
 # The following define makes your compiler emit warnings if you use
 # any Qt feature that has been marked deprecated (the exact warnings

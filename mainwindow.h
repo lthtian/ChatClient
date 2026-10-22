@@ -28,6 +28,7 @@ class MediaWindow;
 class QProgressDialog;
 class QCloseEvent;
 class DesktopBroadcast;
+class CameraWindow;
 
 struct node{
     int y, m, d;
@@ -127,6 +128,7 @@ private:
     void appendLiveMessage(const QJsonObject& conversation, const QJsonObject& message); // 创建带状态和观看按钮的卡片。
     void handleLiveState(const QJsonObject& conversation, const QJsonObject& live); // 回调推送和状态查询共用更新路径。
     void watchLive(const QJsonObject& conversation, const QJsonObject& live, const QString& format); // 绑定直播授权，复用播放器。
+    void openCamera(const QJsonObject& conversation, const QJsonObject& live, bool publishing); // 摄像头发布或 RTC 观看，业务权限仍走聊天连接。
 
     MediaTransfer* media_ = nullptr; // 拥有控制请求及单个文件传输任务。
     QProgressDialog* transferProgress_ = nullptr; // 上传下载的进度和取消入口。
@@ -139,6 +141,8 @@ private:
     QString watchingLiveId_; // 当前播放器绑定的直播，防止其他卡片状态结束当前流。
     QJsonObject watchingConversation_; // 观看期间切换聊天也保留授权会话。
     QPointer<DesktopBroadcast> broadcast_; // 单个桌面直播控制窗口，关闭后自动置空。
+    QPointer<CameraWindow> cameraPublisher_; // 摄像头采集与 RTC 发布窗口。
+    QPointer<CameraWindow> cameraViewer_; // RTC 观看窗口，独立于文件/HTTP 播放器。
 
     // 消息处理方法（由 recvHandler 分发）
     void handleInitMsgAck(const QJsonObject& jsonObj);
