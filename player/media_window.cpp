@@ -1,6 +1,9 @@
 ﻿#include "media_window.h"
 
 #include <QDateTime>
+#include <QDebug>
+#include <QJsonDocument>
+#include <QMetaEnum>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -72,6 +75,16 @@ MediaWindow::MediaWindow()
       status_(new QLabel(this)),
       quality_(new QComboBox(this)),
       decoder_(new MediaDecoder) {
+  trace_clock_.start();
+  const QString trace_path = qEnvironmentVariable("CHAT_MEDIA_TRACE");
+  if (!trace_path.isEmpty()) {
+    trace_file_.setFileName(trace_path);
+    if (trace_file_.open(QIODevice::WriteOnly | QIODevice::Append)) {
+      trace_timer_.setInterval(500);
+      connect(&trace_timer_, &QTimer::timeout, this, [this] { Trace("sample"); });
+      trace_timer_.start();
+    } else qWarning("Cannot open CHAT_MEDIA_TRACE output");
+  }
   qRegisterMetaType<MediaBatch>();
   qRegisterMetaType<MediaSource>();
   setWindowTitle(QString::fromUtf8("音视频播放器"));
@@ -91,6 +104,7 @@ MediaWindow::MediaWindow()
   UpdateControls();
 }
 MediaWindow::~MediaWindow() {
+  Trace("close");
   audio_.Close();
   thread_.requestInterruption();
   thread_.quit();
@@ -170,6 +184,18 @@ void MediaWindow::CreateControls() {
 }
 
 void MediaWindow::ConnectDecoder() {
+  connect(decoder_, &MediaDecoder::TimelineReady, this,
+      [this](quint64 session, qint64 origin, qint64 seek_origin) {
+    if (session != session_) { ++stale_results_; return; }
+    origin_us_ = origin; seek_origin_us_ = seek_origin; timeline_known_ = true;
+    Trace("timeline");
+  });
+  connect(decoder_, &MediaDecoder::AudioDiscontinuity, this,
+      [this](quint64 session, qint64 actual, qint64 expected) {
+    if (session != session_) { ++stale_results_; return; }
+    Trace("audio_discontinuity", {{"actual_pts_us", double(actual)},
+          {"expected_pts_us", double(expected)}, {"delta_us", double(actual - expected)}});
+  });
   decoder_->moveToThread(&thread_);
   connect(&thread_, &QThread::finished, decoder_, &QObject::deleteLater);
   // 显式排队连接保证槽函数在 decoder_ 所属线程执行。
@@ -187,7 +213,7 @@ void MediaWindow::ConnectDecoder() {
   connect(decoder_, &MediaDecoder::Opened, this,
           [this](quint64 session, qint64 duration, bool has_audio,
                  qint64 audio_end) {
-            if (session != session_) return;
+            if (session != session_) { ++stale_results_; return; }
             try {
               opened_ = true;
               duration_us_ = duration;
@@ -210,6 +236,7 @@ void MediaWindow::ConnectDecoder() {
               } else
                 status_->setToolTip(
                     QString::fromUtf8("此文件没有音轨，使用单调时钟"));
+              Trace("opened");
               // 重新授权后是重新打开容器，要先恢复媒体位置再继续送包。
               if (!source_.IsLive() && base_us_ > 0) {
                 in_flight_ = true;
@@ -222,15 +249,16 @@ void MediaWindow::ConnectDecoder() {
             }
           });
   connect(decoder_, &MediaDecoder::Seeked, this, [this](quint64 session) {
-    if (session != session_) return;
+    if (session != session_) { ++stale_results_; return; }
     in_flight_ = false;
+    Trace("seek_completed");
     RequestData();
   });
   connect(decoder_, &MediaDecoder::BatchReady, this,
           [this](quint64 session, MediaBatch batch) {
             // 排队信号已经发出后无法撤回；代次检查避免 seek
             // 后出现旧声音和旧画面。
-            if (session != session_) return;
+            if (session != session_) { ++stale_results_; return; }
             in_flight_ = false;
             try {
               AcceptBatch(std::move(batch));
@@ -247,7 +275,7 @@ void MediaWindow::ConnectDecoder() {
           });
   connect(decoder_, &MediaDecoder::Failed, this,
           [this](quint64 session, QString message) {
-            if (session != session_) return;
+            if (session != session_) { ++stale_results_; return; }
             if (AuthorizationExpired())
               RefreshAuthorization(PositionUs(), state_ == State::Playing ||
                   (state_ == State::Buffering && play_after_buffering_));
@@ -286,6 +314,7 @@ void MediaWindow::ChangeRendition(int index) {
 void MediaWindow::ClearPending(qint64 position_us) {
   pictures_.clear();
   picture_bytes_ = 0;
+  received_video_pts_us_ = received_audio_pts_us_ = presented_pts_us_ = -1;
   in_flight_ = eof_ = false;
   base_us_ = last_video_end_us_ = position_us;
   audio_clock_ = false;
@@ -343,6 +372,7 @@ void MediaWindow::OpenSource(MediaSource source, qint64 position_us, bool play_a
   audio_.Close();
   ClearPending(position_us);
   source_ = std::move(source);
+  timeline_known_ = false;
   UpdateRenditions();
   silent_audio_ = false;
   error_.clear();
@@ -356,6 +386,7 @@ void MediaWindow::OpenSource(MediaSource source, qint64 position_us, bool play_a
   setWindowTitle(source_.name + (source_.IsOnline() ? QStringLiteral(" · 在线播放")
                                                    : QStringLiteral(" · 本地播放")));
   awaiting_authorization_ = source_.IsOnline() && source_.location.isEmpty();
+  Trace("open_requested");
   UpdateControls();
   if (awaiting_authorization_)
     emit AuthorizationRequested(session_, source_.rendition);
@@ -397,12 +428,16 @@ void MediaWindow::RefreshAuthorization(qint64 position_us, bool play_after) {
 
 void MediaWindow::AcceptBatch(MediaBatch batch) {
   for (auto& picture : batch.video) {
+    received_video_pts_us_ = picture.pts_us;
     picture_bytes_ += picture.image.sizeInBytes();
     pictures_.push_back(std::move(picture));
   }
   if (picture_bytes_ > 64 * 1024 * 1024 || pictures_.size() > 180)
     throw std::runtime_error("声画交错间隔过大，画面缓存达到本例上限");
-  for (auto& block : batch.audio) audio_.Append(std::move(block));
+  for (auto& block : batch.audio) {
+    received_audio_pts_us_ = block.pts_us;
+    audio_.Append(std::move(block));
+  }
   eof_ = batch.eof;
 }
 qint64 MediaWindow::BufferAheadUs(qint64 requested_us) const {
@@ -462,8 +497,9 @@ void MediaWindow::TryStart() {
       auto picture = std::move(pictures_.front());
       pictures_.pop_front();
       picture_bytes_ -= picture.image.sizeInBytes();
-      view_->SetImage(std::move(picture.image));
+      view_->SetImage(std::move(picture.image), picture.geometry);
       last_video_end_us_ = picture.pts_us + picture.duration_us;
+      presented_pts_us_ = picture.pts_us;
       emit FramePresented(picture.pts_us);
     }
     audio_.Pause();
@@ -498,7 +534,8 @@ void MediaWindow::Tick() {
       last_video_end_us_ = picture.pts_us + picture.duration_us;
       // 若另一张图也已到显示时间，跳过这张迟到图；只绘制最后一张到期画面。
       if (!pictures_.empty() && pictures_.front().pts_us <= position) continue;
-      view_->SetImage(std::move(picture.image));
+      view_->SetImage(std::move(picture.image), picture.geometry);
+      presented_pts_us_ = picture.pts_us;
       emit FramePresented(picture.pts_us);
     }
     if (eof_ && pictures_.empty() && position >= last_video_end_us_ &&
@@ -528,6 +565,7 @@ void MediaWindow::BufferUnderrun(qint64 position_us) {
   state_ = State::Buffering;
   play_after_buffering_ = true;
   rebuffering_ = true;
+  Trace("underrun");
   // 不清空队列、不 seek：只等待在途 Read 和后续请求补足数据。
 }
 
@@ -557,6 +595,7 @@ void MediaWindow::StartSeek(qint64 position_us, bool play_after) {
     // 定位也是在途操作，等 Seeked 返回后再发读包请求。
     in_flight_ = true;
     UpdateControls();
+    Trace("seek_requested", {{"target_us", double(target)}});
     emit SeekRequested(target, session_);
   } catch (const std::exception& e) {
     Fail(QString::fromUtf8(e.what()));
@@ -635,6 +674,7 @@ void MediaWindow::Fail(const QString& message) {
   awaiting_authorization_ = false;
   state_ = State::Error;
   error_ = message;
+  Trace("failure");
   timer_.stop();
   audio_.Close();
   pictures_.clear();
@@ -659,6 +699,49 @@ bool MediaWindow::RetryLive(const QString& message) {
   UpdateControls();
   return true;
 }
+QJsonObject MediaWindow::DiagnosticSnapshot() const {
+  const auto maybe_pts = [](qint64 value) {
+    return value < 0 ? QJsonValue() : QJsonValue(double(value));
+  };
+  return {{"schema", 1}, {"window", QString::number(quintptr(this), 16)},
+      {"monotonic_us", double(trace_clock_.nsecsElapsed() / 1000)},
+      {"session", QString::number(session_)},
+      {"state", QMetaEnum::fromType<State>().valueToKey(int(state_))},
+      {"position_us", double(PositionUs())}, {"duration_us", double(duration_us_)},
+      {"source_kind", int(source_.kind)},
+      {"origin_us", timeline_known_ ? QJsonValue(double(origin_us_)) : QJsonValue()},
+      {"seek_origin_us", timeline_known_ ? QJsonValue(double(seek_origin_us_)) : QJsonValue()},
+      {"clock", audio_clock_ ? "audio_device_estimate" : "monotonic"},
+      {"video_received_pts_us", maybe_pts(received_video_pts_us_)},
+      {"audio_received_pts_us", maybe_pts(received_audio_pts_us_)},
+      {"video_presented_pts_us", maybe_pts(presented_pts_us_)},
+      {"video_front_pts_us", pictures_.empty() ? QJsonValue() : QJsonValue(double(pictures_.front().pts_us))},
+      {"video_tail_end_us", pictures_.empty() ? QJsonValue() :
+          QJsonValue(double(pictures_.back().pts_us + pictures_.back().duration_us))},
+      {"video_queue_bytes", double(picture_bytes_)}, {"video_queue_frames", int(pictures_.size())},
+      {"buffer_target_us", double(BufferAheadUs(source_.IsOnline() ? 1000000 : 150000))},
+      {"in_flight", in_flight_}, {"eof", eof_}, {"rebuffering", rebuffering_},
+      {"stale_results", QString::number(stale_results_)}, {"audio", audio_.Diagnostics()}};
+}
+
+void MediaWindow::Trace(const char* event, QJsonObject details) {
+  if (!trace_file_.isOpen()) return;
+  QJsonObject value = DiagnosticSnapshot();
+  value["event"] = event;
+  if (!details.isEmpty()) value["details"] = details;
+  QByteArray line = QJsonDocument(value).toJson(QJsonDocument::Compact) + '\n';
+  constexpr qint64 limit = 8 * 1024 * 1024;
+  if (trace_file_.size() + line.size() > limit) {
+    trace_timer_.stop(); trace_file_.close();
+    qWarning("CHAT_MEDIA_TRACE reached 8 MiB limit; tracing stopped");
+    return;
+  }
+  if (trace_file_.write(line) != line.size() || !trace_file_.flush()) {
+    trace_timer_.stop(); trace_file_.close();
+    qWarning("CHAT_MEDIA_TRACE write failed; tracing stopped");
+  }
+}
+
 void MediaWindow::ToggleFullscreen() {
   if (isFullScreen())
     showNormal();
@@ -666,6 +749,11 @@ void MediaWindow::ToggleFullscreen() {
     showFullScreen();
 }
 void MediaWindow::UpdateControls() {
+  if (traced_state_ != state_ || traced_session_ != session_) {
+    Trace("state");
+    traced_state_ = state_;
+    traced_session_ = session_;
+  }
   play_button_->setEnabled(state_ != State::Empty && state_ != State::Error);
   stop_button_->setEnabled(state_ != State::Empty && state_ != State::Error);
   progress_->setEnabled(opened_ && duration_us_ > 0 && state_ != State::Error);

@@ -3,6 +3,7 @@
 #include <QFileInfo>
 #include <QThread>
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 
 namespace {
@@ -174,6 +175,7 @@ void MediaDecoder::Open(MediaSource source, quint64 session) {
     }
     // 直播可能从非零时刻的 GOP 加入。第一份解码输出建立两轨共同起点，不能等待过去的时间。
     if (live_) origin_us_ = AV_NOPTS_VALUE;
+    if (!live_) emit TimelineReady(session_, origin_us_, seek_origin_us_);
     scaler_->flags = SWS_BILINEAR;
     scaler_->threads = 1;
     emit Opened(session_, std::max<qint64>(0, duration), audio_ != nullptr,
@@ -256,6 +258,7 @@ int MediaDecoder::Receive(AVCodecContext* codec, bool video,
       const auto* stream = video ? video_stream_ : audio_stream_;
       origin_us_ = frame_->best_effort_timestamp == AV_NOPTS_VALUE ? 0 :
           av_rescale_q(frame_->best_effort_timestamp, stream->time_base, kUs);
+      emit TimelineReady(session_, origin_us_, seek_origin_us_);
     }
     if (video)
       ConvertVideo(batch);
@@ -327,8 +330,23 @@ void MediaDecoder::ConvertVideo(MediaBatch& batch) {
   // 独立拥有像素，工作线程复用 AVFrame 不会破坏 GUI 尚未显示的画面。
   QImage owned = image.copy();
   if (owned.isNull()) throw std::bad_alloc();
+  VideoGeometry geometry;
+  const AVRational sar = av_guess_sample_aspect_ratio(
+      input_.get(), input_->streams[video_stream_->index], frame_.get());
+  if (sar.num > 0 && sar.den > 0) { geometry.sar_num = sar.num; geometry.sar_den = sar.den; }
+  const auto* frame_matrix = av_frame_get_side_data(frame_.get(), AV_FRAME_DATA_DISPLAYMATRIX);
+  const auto* stream_matrix = av_packet_side_data_get(video_stream_->codecpar->coded_side_data,
+      video_stream_->codecpar->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX);
+  const uint8_t* matrix = frame_matrix ? frame_matrix->data : stream_matrix ? stream_matrix->data : nullptr;
+  const size_t matrix_size = frame_matrix ? frame_matrix->size : stream_matrix ? stream_matrix->size : 0;
+  if (matrix) {
+    if (matrix_size < 9 * sizeof(int32_t)) throw std::runtime_error("显示矩阵长度无效");
+    int32_t values[9];
+    std::memcpy(values, matrix, sizeof(values));
+    geometry.SetDisplayMatrix(values);
+  }
   batch.video.push_back({std::move(owned), std::max(target_us_, pts),
-                         next_video_us_ - std::max(target_us_, pts)});
+                         next_video_us_ - std::max(target_us_, pts), geometry});
 }
 
 void MediaDecoder::PrepareAudio() {
@@ -363,6 +381,7 @@ int MediaDecoder::ConvertAudio(const AVFrame* source, MediaBatch& batch) {
     const qint64 expected = audio_origin_us_ + av_rescale_q(
         audio_samples_ + swr_get_delay(resampler_.get(), output_rate_), AVRational{1, output_rate_}, kUs);
     if (std::abs(actual - expected) > 100000) {
+      emit AudioDiscontinuity(session_, actual, expected);
       // 分片丢失后 PCM 不能按采样数拼接掉时间空隙，否则音频时钟会永久落后视频。
       while (ConvertAudio(nullptr, batch) > 0) {}
       swr_close(resampler_.get());

@@ -10,6 +10,7 @@
 #include <chrono>
 
 #include "media_source.h"
+#include "video_geometry.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -23,6 +24,7 @@ struct VideoPicture {
   QImage image;            // 拥有像素的 RGB 图像，不借用 AVFrame 内存。
   qint64 pts_us = 0;       // 画面的显示位置。
   qint64 duration_us = 0;  // 画面的预计持续时间。
+  VideoGeometry geometry{};  // SAR 与正交显示矩阵，随画面跨线程传递。
 };
 
 // 设备格式的 PCM 块：S16、小端、左右声道交错。
@@ -58,6 +60,8 @@ class MediaDecoder : public QObject {
             quint64 session);  // 定位、清状态并切换会话编号。
 
  signals:
+  void TimelineReady(quint64 session, qint64 origin_us, qint64 seek_origin_us);
+  void AudioDiscontinuity(quint64 session, qint64 actual_us, qint64 expected_us);
   void Opened(quint64 session, qint64 duration_us, bool has_audio,
               qint64 audio_end_us);  // 返回轨道信息；音轨结束位置未知时为 -1。
   void BatchReady(quint64 session, MediaBatch batch);  // 交付一次请求的结果。

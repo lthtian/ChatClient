@@ -2,6 +2,8 @@
 #define VIDEO_PLAYER_MEDIA_WINDOW_H_
 
 #include <QElapsedTimer>
+#include <QFile>
+#include <QJsonObject>
 #include <QSlider>
 #include <QThread>
 #include <QTimer>
@@ -47,6 +49,7 @@ class MediaWindow : public QWidget {
   void SeekTo(qint64 position_us);  // 跳到媒体位置，保留当前播放/暂停意图。
   void TogglePlayback();            // 暂停、恢复，或从停止/结束状态重播。
   void Stop();  // 清掉声音和缓存并回到零；下一次播放从头定位。
+  QJsonObject DiagnosticSnapshot() const;  // GUI 线程采样，时间单位微秒。
   State state() const { return state_; }  // 获取当前播放状态。
   bool HasAudioOutput() const { return audio_.IsOpen(); }  // 是否实际启用了声音设备。
   qint64 PositionUs() const;              // 获取公共媒体时间轴上的播放位置。
@@ -88,8 +91,21 @@ class MediaWindow : public QWidget {
   bool RetryLive(const QString& message);  // 最多五次退避重连；暂停、停止和结束时取消。
   void ClearPending(qint64 position_us);  // 清缓存和本次时钟，设置定位目标。
   void UpdateControls();    // 根据状态更新时间、按钮及非拖动中的进度条。
+  void Trace(const char* event, QJsonObject details = {});
   void ToggleFullscreen();  // 在普通窗口与全屏间切换。
 
+  QFile trace_file_;              // CHAT_MEDIA_TRACE 指定 JSONL 文件，默认关闭。
+  QTimer trace_timer_;            // 500ms 采样；暂停与重缓冲期间仍可观测。
+  QElapsedTimer trace_clock_;     // 相对窗口创建的单调时间，与媒体时间分离。
+  State traced_state_ = State::Empty;
+  quint64 traced_session_ = 0;
+  quint64 stale_results_ = 0;
+  qint64 received_video_pts_us_ = -1;
+  qint64 received_audio_pts_us_ = -1;
+  qint64 presented_pts_us_ = -1;
+  qint64 origin_us_ = 0;
+  qint64 seek_origin_us_ = 0;
+  bool timeline_known_ = false;
   VideoView* view_;           // 复用第三阶段的等比例画布，Qt 父对象拥有它。
   QPushButton* play_button_;  // 播放、暂停与重播按钮。
   QPushButton* stop_button_;  // 停止并回到零的按钮。

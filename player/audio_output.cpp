@@ -176,6 +176,24 @@ void AudioOutput::SetVolume(int percent, bool muted) {
     output_->setVolume(muted ? 0.0 : linear);
   }
 }
+QJsonObject AudioOutput::Diagnostics() const {
+  QJsonObject value{{"open", IsOpen()}, {"paused", paused_}};
+  if (!output_) return value;
+  value["sample_rate"] = format_.sampleRate();
+  value["base_us"] = double(base_us_);
+  value["position_estimate_us"] = double(PositionUs());
+  value["received_end_us"] = double(end_us_);
+  value["pending_pcm_bytes"] = double(pending_bytes_);
+  value["pending_period_bytes"] = period_.size();
+  value["written_bytes"] = double(written_bytes_);
+  value["device_queued_bytes"] = std::max(0, output_->bufferSize() - output_->bytesFree());
+  value["device_buffer_bytes"] = output_->bufferSize();
+  value["device_period_bytes"] = output_->periodSize();
+  value["next_pcm_pts_us"] = blocks_.empty() ? QJsonValue() :
+      QJsonValue(double(blocks_.front().pts_us + UsForBytes(block_offset_)));
+  value["device_state"] = int(output_->state());
+  return value;
+}
 QString AudioOutput::Description() const {
   return QString::fromUtf8("%1 · %2 Hz / stereo / S16")
       .arg(device_.deviceName())

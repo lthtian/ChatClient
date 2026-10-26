@@ -7,7 +7,8 @@ VideoView::VideoView(QWidget* parent) : QWidget(parent) {
   setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
 
-void VideoView::SetImage(QImage image) {
+void VideoView::SetImage(QImage image, VideoGeometry geometry) {
+  geometry_ = geometry;
   image_ = std::move(image);
   // update 请求事件循环安排重绘，不在此处直接调用 paintEvent。
   update();
@@ -17,10 +18,7 @@ void VideoView::paintEvent(QPaintEvent*) {
   QPainter painter(this);
   painter.fillRect(rect(), Qt::black);
   if (image_.isNull()) return;
-  const QSize size = image_.size().scaled(this->size(), Qt::KeepAspectRatio);
-  const QRect target((width() - size.width()) / 2,
-                     (height() - size.height()) / 2, size.width(),
-                     size.height());
+  painter.setWorldTransform(geometry_.PixelTransform(image_.size(), size()));
   painter.setRenderHint(QPainter::SmoothPixmapTransform);
-  painter.drawImage(target, image_);
+  painter.drawImage(QPointF(), image_);
 }

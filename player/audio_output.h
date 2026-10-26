@@ -3,6 +3,7 @@
 
 #include <QAudioDeviceInfo>
 #include <QAudioOutput>
+#include <QJsonObject>
 #include <deque>
 #include <memory>
 
@@ -27,6 +28,7 @@ class AudioOutput {
     return output_ != nullptr;
   }  // 是否已创建音频输出对象。
   int SampleRate() const { return format_.sampleRate(); }  // 实际目标采样率。
+  QJsonObject Diagnostics() const;  // 同一次 GUI 采样中的队列与设备计数。
   QString Description() const;  // 设备名称与协商格式，用于状态说明。
 
  private:
