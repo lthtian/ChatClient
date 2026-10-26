@@ -71,7 +71,9 @@ MediaWindow::MediaWindow()
       volume_(new QSlider(Qt::Horizontal, this)),
       status_(new QLabel(this)),
       quality_(new QComboBox(this)),
-      decoder_(new MediaDecoder) {
+      decoder_(new MediaDecoder),
+      playback_(view_, this) {
+  connect(&playback_, &Playback::FramePresented, this, &MediaWindow::FramePresented);
   qRegisterMetaType<MediaBatch>();
   qRegisterMetaType<MediaSource>();
   setWindowTitle(QString::fromUtf8("音视频播放器"));
@@ -91,7 +93,7 @@ MediaWindow::MediaWindow()
   UpdateControls();
 }
 MediaWindow::~MediaWindow() {
-  audio_.Close();
+  playback_.Close();
   thread_.requestInterruption();
   thread_.quit();
   thread_.wait();
@@ -136,10 +138,10 @@ void MediaWindow::CreateControls() {
   connect(fullscreen, &QPushButton::clicked, this,
           &MediaWindow::ToggleFullscreen);
   connect(volume_, &QSlider::valueChanged, this, [this](int value) {
-    audio_.SetVolume(value, mute_button_->isChecked());
+    playback_.Audio().SetVolume(value, mute_button_->isChecked());
   });
   connect(mute_button_, &QPushButton::toggled, this,
-          [this](bool muted) { audio_.SetVolume(volume_->value(), muted); });
+          [this](bool muted) { playback_.Audio().SetVolume(volume_->value(), muted); });
   // 拖动期间冻结播放；松手只定位一次，避免每移动一个像素就清空解码器。
   connect(progress_, &QSlider::sliderPressed, this, [this] {
     resume_after_drag_ = state_ == State::Playing ||
@@ -194,16 +196,17 @@ void MediaWindow::ConnectDecoder() {
               // 切档或续签恢复的位置也必须落在新输入的有效时间范围内。
               if (duration_us_ > 0)
                 base_us_ = std::clamp<qint64>(base_us_, 0, std::max<qint64>(0, duration_us_ - 1000));
-              audio_end_us_ = audio_end;
+              playback_.Reset(base_us_);
+              playback_.SetAudioEndUs(audio_end);
               silent_audio_ = false;
               if (has_audio) {
-                const int rate = audio_.Open();
+                const int rate = playback_.Audio().Open();
                 silent_audio_ = rate == 0;
                 emit AudioEnabledRequested(!silent_audio_);
                 if (rate > 0) {
                   emit OutputRateRequested(rate);
-                  audio_.Restart(base_us_);
-                  status_->setToolTip(audio_.Description());
+                  playback_.Audio().Restart(base_us_);
+                  status_->setToolTip(playback_.Audio().Description());
                 } else {
                   status_->setToolTip(QStringLiteral("没有音频输出设备，使用单调时钟无声播放；重新打开会再次检测设备"));
                 }
@@ -234,7 +237,7 @@ void MediaWindow::ConnectDecoder() {
             in_flight_ = false;
             try {
               AcceptBatch(std::move(batch));
-              if (source_.IsLive() && eof_) {
+              if (source_.IsLive() && playback_.Eof()) {
                 Fail(QStringLiteral("直播连接已断开"));
                 return;
               }
@@ -284,12 +287,9 @@ void MediaWindow::ChangeRendition(int index) {
 }
 
 void MediaWindow::ClearPending(qint64 position_us) {
-  pictures_.clear();
-  picture_bytes_ = 0;
-  in_flight_ = eof_ = false;
-  base_us_ = last_video_end_us_ = position_us;
-  audio_clock_ = false;
-  clock_.invalidate();
+  playback_.Reset(position_us);
+  in_flight_ = false;
+  base_us_ = position_us;
 }
 void MediaWindow::OpenFile(const QString& filename) {
   MediaSource source;
@@ -328,7 +328,7 @@ void MediaWindow::SetLiveState(const QString& state) {
   decoder_->RequestSession(session_);
   emit CloseRequested(session_);
   timer_.stop();
-  audio_.Close();
+  playback_.Close();
   ClearPending(0);
   opened_ = awaiting_authorization_ = false;
   state_ = State::Ended;
@@ -340,16 +340,17 @@ void MediaWindow::OpenSource(MediaSource source, qint64 position_us, bool play_a
   ++session_;
   decoder_->RequestSession(session_);
   timer_.stop();
-  audio_.Close();
+  playback_.Close();
   ClearPending(position_us);
   source_ = std::move(source);
+  playback_.Configure(source_.IsLive(), source_.IsOnline());
   UpdateRenditions();
   silent_audio_ = false;
   error_.clear();
   opened_ = false;
   rebuffering_ = false;
   duration_us_ = 0;
-  audio_end_us_ = -1;
+  playback_.SetAudioEndUs(-1);
   state_ = State::Buffering;
   play_after_buffering_ = play_after;
   if (position_us == 0) view_->SetImage({});
@@ -377,6 +378,7 @@ void MediaWindow::SetOnlineSource(quint64 session, MediaSource source, const QSt
     return;
   }
   source_ = std::move(source);
+  playback_.Configure(source_.IsLive(), source_.IsOnline());
   UpdateRenditions();
   UpdateControls();
   emit OpenRequested(source_, session_);
@@ -396,123 +398,41 @@ void MediaWindow::RefreshAuthorization(qint64 position_us, bool play_after) {
 }
 
 void MediaWindow::AcceptBatch(MediaBatch batch) {
-  for (auto& picture : batch.video) {
-    picture_bytes_ += picture.image.sizeInBytes();
-    pictures_.push_back(std::move(picture));
-  }
-  if (picture_bytes_ > 64 * 1024 * 1024 || pictures_.size() > 180)
-    throw std::runtime_error("声画交错间隔过大，画面缓存达到本例上限");
-  for (auto& block : batch.audio) audio_.Append(std::move(block));
-  eof_ = batch.eof;
-}
-qint64 MediaWindow::BufferAheadUs(qint64 requested_us) const {
-  if (pictures_.empty()) return std::min<qint64>(requested_us, 150000);
-  const auto& picture = pictures_.back();
-  const qint64 bytes = std::max<qint64>(1, picture.image.sizeInBytes());
-  // 解复用会同时推进音视频；音频预读也要为随之读出的 RGB 帧预留空间。
-  const qint64 frames = std::max<qint64>(1, 32 * 1024 * 1024 / bytes - 2);
-  return std::min(requested_us, frames * std::max<qint64>(1, picture.duration_us));
+  playback_.Append(std::move(batch));
 }
 void MediaWindow::RequestData() {
-  if (!opened_ || in_flight_ || eof_ ||
-      (state_ != State::Buffering && state_ != State::Playing))
-    return;
-  const qint64 position = PositionUs();
+  if (!opened_ || in_flight_ || playback_.Eof() ||
+      (state_ != State::Buffering && state_ != State::Playing)) return;
   if (AuthorizationExpired()) {
-    RefreshAuthorization(position, state_ == State::Playing || play_after_buffering_);
+    RefreshAuthorization(PositionUs(), state_ == State::Playing || play_after_buffering_);
     return;
   }
-  const qint64 ahead = BufferAheadUs(source_.IsOnline() ? 1000000 : 150000);
-  const bool need_video = pictures_.empty() ||
-      (pictures_.back().pts_us < position + ahead && picture_bytes_ < 32 * 1024 * 1024);
-  const bool need_audio =
-      audio_.IsOpen() && audio_.BufferedEndUs() < position + ahead &&
-      (audio_end_us_ < 0 || audio_.BufferedEndUs() + 1000 < audio_end_us_);
-  if (state_ == State::Buffering || need_video || need_audio) {
+  if (state_ == State::Buffering || playback_.NeedsData()) {
     in_flight_ = true;
     emit ReadRequested(session_);
   }
 }
 void MediaWindow::TryStart() {
-  if (state_ != State::Buffering) return;
-  if (pictures_.empty() && !(rebuffering_ && eof_)) {
-    if (eof_) throw std::runtime_error("定位后没有可显示的画面");
-    return;
-  }
-  // 起播和持续预读共用内存预算，避免等待音频时超过视频缓存上限。
-  const qint64 ready_us = BufferAheadUs(source_.IsOnline() ? 500000 : 100000);
-  const bool video_ready = !source_.IsOnline() || !play_after_buffering_ || eof_ ||
-      picture_bytes_ >= 32 * 1024 * 1024 ||
-      (!pictures_.empty() && pictures_.back().pts_us + pictures_.back().duration_us >= base_us_ + ready_us);
-  const bool audio_ready =
-      !audio_.IsOpen() || eof_ || audio_.BufferedEndUs() >= base_us_ + ready_us ||
-      (audio_end_us_ >= 0 && audio_.BufferedEndUs() + 1000 >= audio_end_us_);
-  if (!video_ready || !audio_ready) return;
-  audio_clock_ =
-      audio_.IsOpen() && (audio_end_us_ < 0 || base_us_ < audio_end_us_);
+  if (state_ != State::Buffering && !(state_ == State::Playing && !playback_.IsRunning())) return;
+  if (!playback_.TryStart(play_after_buffering_, !rebuffering_)) return;
   state_ = play_after_buffering_ ? State::Playing : State::Paused;
   if (source_.IsLive() && play_after_buffering_) reconnect_attempts_ = 0;
-  if (play_after_buffering_) {
-    audio_.Resume();
-    clock_.start();
-    timer_.start();
-  } else {
-    // 暂停 seek 只显示目标预览，不向设备写 PCM；已有 PCM 留给恢复播放。
-    if (!rebuffering_ && !pictures_.empty()) {
-      auto picture = std::move(pictures_.front());
-      pictures_.pop_front();
-      picture_bytes_ -= picture.image.sizeInBytes();
-      view_->SetImage(std::move(picture.image));
-      last_video_end_us_ = picture.pts_us + picture.duration_us;
-      emit FramePresented(picture.pts_us);
-    }
-    audio_.Pause();
-  }
+  if (play_after_buffering_) timer_.start();
   rebuffering_ = false;
   UpdateControls();
 }
-qint64 MediaWindow::PositionUs() const {
-  if (state_ != State::Playing) return base_us_;
-  if (audio_clock_) return audio_.PositionUs();
-  return base_us_ + (clock_.isValid() ? clock_.nsecsElapsed() / 1000 : 0);
-}
+qint64 MediaWindow::PositionUs() const { return playback_.PositionUs(); }
 
 void MediaWindow::Tick() {
   if (state_ != State::Playing) return;
   try {
-    const bool audio_finished =
-        eof_ ||
-        (audio_end_us_ >= 0 && audio_.BufferedEndUs() + 1000 >= audio_end_us_);
-    audio_.Pump(audio_finished);
-    if (audio_clock_ && audio_finished && audio_.Drained()) {
-      // 音轨先结束时，以同一个位置接续单调时钟，让剩余视频继续显示。
-      base_us_ = audio_.PositionUs();
-      audio_clock_ = false;
-      clock_.restart();
-    }
-    const qint64 position = PositionUs();
-    while (!pictures_.empty() && pictures_.front().pts_us <= position) {
-      auto picture = std::move(pictures_.front());
-      pictures_.pop_front();
-      picture_bytes_ -= picture.image.sizeInBytes();
-      last_video_end_us_ = picture.pts_us + picture.duration_us;
-      // 若另一张图也已到显示时间，跳过这张迟到图；只绘制最后一张到期画面。
-      if (!pictures_.empty() && pictures_.front().pts_us <= position) continue;
-      view_->SetImage(std::move(picture.image));
-      emit FramePresented(picture.pts_us);
-    }
-    if (eof_ && pictures_.empty() && position >= last_video_end_us_ &&
-        audio_.Drained()) {
-      base_us_ = std::max(last_video_end_us_,
-                          audio_.IsOpen() ? audio_.BufferedEndUs() : 0);
+    const auto result = playback_.Tick();
+    if (result == Playback::Result::Ended) {
+      base_us_ = playback_.PositionUs();
       state_ = State::Ended;
       timer_.stop();
-    }
-    // 本地读取很快；网络输入可能暂时跟不上设备，不能让无音轨时钟继续空跑。
-    if (source_.IsOnline() && !eof_ && state_ == State::Playing &&
-        ((audio_clock_ && !audio_finished && audio_.BufferedEndUs() - position < 30000) ||
-         (pictures_.empty() && position >= last_video_end_us_))) {
-      BufferUnderrun(audio_clock_ ? position : std::min(position, last_video_end_us_));
+    } else if (result == Playback::Result::Buffering) {
+      BufferUnderrun(playback_.PositionUs());
     }
     RequestData();
     UpdateControls();
@@ -523,7 +443,7 @@ void MediaWindow::Tick() {
 
 void MediaWindow::BufferUnderrun(qint64 position_us) {
   base_us_ = position_us;
-  audio_.Pause();
+  playback_.Pause();
   timer_.stop();
   state_ = State::Buffering;
   play_after_buffering_ = true;
@@ -551,7 +471,7 @@ void MediaWindow::StartSeek(qint64 position_us, bool play_after) {
     rebuffering_ = false;
     timer_.stop();
     ClearPending(target);
-    audio_.Restart(target);
+    playback_.Audio().Restart(target);
     state_ = State::Buffering;
     play_after_buffering_ = play_after;
     // 定位也是在途操作，等 Seeked 返回后再发读包请求。
@@ -572,7 +492,7 @@ void MediaWindow::TogglePlayback() {
       decoder_->RequestSession(session_);
       emit CloseRequested(session_);
       timer_.stop();
-      audio_.Close();
+      playback_.Close();
       ClearPending(0);
       opened_ = awaiting_authorization_ = false;
       state_ = State::Paused;
@@ -585,7 +505,7 @@ void MediaWindow::TogglePlayback() {
   }
   if (state_ == State::Playing) {
     base_us_ = PositionUs();
-    audio_.Pause();
+    playback_.Pause();
     state_ = State::Paused;
     timer_.stop();
   } else if (state_ == State::Paused) {
@@ -593,9 +513,8 @@ void MediaWindow::TogglePlayback() {
       RefreshAuthorization(base_us_, true);
       return;
     }
-    audio_.Resume();
+    playback_.Resume();
     state_ = State::Playing;
-    clock_.restart();
     timer_.start();
     Tick();
   } else if (state_ == State::Stopped || state_ == State::Ended) {
@@ -617,8 +536,7 @@ void MediaWindow::Stop() {
     awaiting_authorization_ = rebuffering_ = false;
     timer_.stop();
     ClearPending(0);
-    audio_.Restart(0);
-    audio_.Pause();
+    playback_.Pause();
     state_ = State::Stopped;
     view_->SetImage({});
     UpdateControls();
@@ -636,9 +554,8 @@ void MediaWindow::Fail(const QString& message) {
   state_ = State::Error;
   error_ = message;
   timer_.stop();
-  audio_.Close();
-  pictures_.clear();
-  picture_bytes_ = 0;
+  playback_.Close();
+  playback_.Reset(base_us_);
   UpdateControls();
 }
 
@@ -649,7 +566,7 @@ bool MediaWindow::RetryLive(const QString& message) {
   decoder_->RequestSession(session_);
   emit CloseRequested(session_);
   timer_.stop();
-  audio_.Close();
+  playback_.Close();
   ClearPending(0);
   opened_ = awaiting_authorization_ = false;
   state_ = State::Buffering;

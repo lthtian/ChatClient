@@ -1,11 +1,9 @@
 ﻿#pragma once
-#include "audio_output.h"
+#include "playback.h"
 #include <QDialog>
-#include <QElapsedTimer>
 #include <QJsonObject>
 #include <QPointer>
 #include <QTimer>
-#include <deque>
 
 class QCamera;
 class QComboBox;
@@ -55,11 +53,7 @@ private:
     QImage latest_; // 最新预览画面，初次开始时交给编码线程。
     QJsonObject live_; // 本窗口绑定的聊天直播卡片。
     QTimer timer_; // 10ms 消费已解码媒体，不承担解码工作。
-    AudioOutput audio_; // 复用设备输出与 PCM 缓存。
-    std::deque<VideoPicture> pictures_; // 最多 16 张，避免 GUI 缓存积压。
-    QElapsedTimer clock_; // 无音频设备时的单调播放时钟。
-    qint64 base_us_ = 0; // 本次起播公共 NTP 媒体位置。
-    bool playing_ = false; // 缓冲就绪后开始消费设备。
+    Playback playback_; // GUI 中共用的缓存、音频时钟和画面展示。
     bool authorizing_ = false; // 等待聊天授权，关闭时也要等回执处理业务资源。
     bool ending_ = false; // live_end 请求正在进行。
     bool closing_ = false; // 关闭窗口后等待异步清理。

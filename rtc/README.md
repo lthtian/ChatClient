@@ -7,11 +7,13 @@
 1. `live_chat.cpp`：创建入口、聊天卡片、`live_create / live_read / live_end`。
 2. `camera_window.h/.cpp`：相机原始画面、麦克风开关、观看输出和异步关闭。
 3. `rtc_connection.h/.cpp`：SDP Offer/Answer、ICE、媒体轨道、RTP/RTCP、会话释放。
-4. `media_codec.h/.cpp`：H.264 / Opus 编码和解码，像素转换、PCM 重采样。
+4. `media_codec.h/.cpp`：发布端 H.264 / Opus 编码及原始数据转换。
 5. `rtp.h/.cpp`：有限乱序缓冲、H.264 NAL 重组和关键帧恢复。
 6. `microphone_capture.h/.cpp`：设备线程独占麦克风启停与采集，向编码线程提供对应时间区间的 PCM。
 
-复用 `broadcast/audio_capture` 的 WASAPI 麦克风采集，以及 `player` 的图像显示、音频设备和媒体批次数据结构。RTC 不使用 MP4/FLV 解封装入口。
+复用 `broadcast/audio_capture` 的 WASAPI 麦克风采集。观看端由 `player/track_decoder` 完成解码、RGB/PCM 转换，`player/playback` 管理缓存、播放时钟和音视频投放；文件、HTTP/HLS 和 RTC 共用这两部分。RTC 的 SDP、RTP 重排/重组、SR 时钟映射仍在 `RtcConnection`，不使用 MP4/FLV 解封装入口。
+
+观看时按 `RtcConnection::run → TrackDecoder::DecodeUnit → TakeMedia → CameraWindow::Tick → Playback::Append/TryStart/Tick` 阅读。文件/HTTP 输入则是 `MediaDecoder::Read → TrackDecoder::Decode → BatchReady → MediaWindow → Playback`。两类输入都输出 `media_types.h` 中的 `MediaBatch`，但保持各自的网络生命周期和背压方式。
 
 麦克风的打开和关闭不在编码循环内执行。设备尚未准备好时继续发送画面与 Opus 静音；准备好后按公共 QPC 原点读取 PCM，不能为麦克风单独重置时间线。`tests/microphone_capture_smoke.pro` 使用真实麦克风验证启停与本地编解码，不上传或保存录音。
 

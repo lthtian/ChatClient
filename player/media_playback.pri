@@ -10,3 +10,9 @@ INCLUDEPATH += $$PWD $$FFMPEG_ROOT/include
 LIBS += -L$$FFMPEG_ROOT/lib -lavformat -lavcodec -lavutil -lswscale -lswresample
 SOURCES += $$PWD/media_decoder.cpp $$PWD/audio_output.cpp $$PWD/media_window.cpp $$PWD/video_view.cpp
 HEADERS += $$PWD/media_source.h $$PWD/media_decoder.h $$PWD/audio_output.h $$PWD/media_window.h $$PWD/video_view.h
+
+SOURCES += $$PWD/track_decoder.cpp
+HEADERS += $$PWD/media_types.h $$PWD/track_decoder.h
+
+SOURCES += $$PWD/playback.cpp
+HEADERS += $$PWD/playback.h

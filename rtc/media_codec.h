@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "media_decoder.h"
+#include "media_types.h"
 #include <QByteArray>
 #include <QImage>
 #include <functional>
@@ -16,16 +16,4 @@ public:
 private:
     struct Data;
     std::unique_ptr<Data> data_; // 编码线程独占，编码回调在同一线程执行。
-};
-
-// 接收已经重组成完整访问单元的数据；解码器不处理 ICE、SRTP 或 RTP 头。
-class CameraDecoder {
-public:
-    explicit CameraDecoder(int output_rate); // 输出采样率由 Qt 音频设备协商，0 表示只看视频。
-    ~CameraDecoder(); // 释放解码器和图像/音频转换器。
-    void Decode(bool video, const QByteArray& bytes, qint64 time_us, MediaBatch& batch);
-    void ResetVideo(); // 参考链损坏后清空解码缓存，再等待完整 IDR。
-private:
-    struct Data;
-    std::unique_ptr<Data> data_; // 接收线程独占；结果复制为拥有内存的 QImage/QByteArray。
 };

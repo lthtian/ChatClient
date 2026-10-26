@@ -26,7 +26,7 @@ Qt Creator 使用 Qt 5.15.2 / MinGW 8.1 / x64 Kit 打开 `ChatClient.pro`。当�
 - FFmpeg 开发包默认目录：`D:/chat/_deps/ffmpeg-8.1.1-full_build-shared`，可用环境变量 `FFMPEG_ROOT` 修改。
 - `player/media_playback.pri` 配置播放器源码、Qt Multimedia 和 FFmpeg 依赖；客户端构建不需要服务端项目目录。
 
-播放器模块：`media_window` 负责播放窗口和调度，`media_decoder` 负责解封装、解码及格式转换，`audio_output` 负责音频设备和 PCM 输出，`video_view` 负责画面绘制。`media_source` 明确区分本地路径和 HTTP 描述，读取差异集中在 `MediaDecoder::OpenInput`；`MediaTransfer::requestPlaybackSource` 负责聊天授权。客户端的播放器修改在此目录完成。
+播放器模块：`media_window` 负责窗口和播放控制，`media_decoder` 负责文件/HTTP/HLS 输入、解封装和定位；`track_decoder` 完成单轨道解码及 RGB/PCM 转换，`playback` 管理缓存、播放时钟和到期画面，后两者也用于 RTC 观看。`audio_output` 负责音频设备和 PCM 输出，`video_view` 负责画面绘制。`media_source` 描述文件和 HTTP 输入，读取差异集中在 `MediaDecoder::OpenInput`；`MediaTransfer::requestPlaybackSource` 负责聊天授权。
 
 在现有 Debug 构建目录，首次接入或修改 `.pro/.pri` 后运行 qmake，再增量编译；仅修改 C++ 文件时直接运行 make。以下为 CMD 命令：
 

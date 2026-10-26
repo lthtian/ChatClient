@@ -1,6 +1,7 @@
 ﻿#include "microphone_capture.h"
 #include "audio_capture.h"
 #include "media_codec.h"
+#include "track_decoder.h"
 #include <QCoreApplication>
 #include <QThread>
 #include <algorithm>
@@ -12,14 +13,22 @@
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     try {
-        CameraDecoder decoder(48000);
+        TrackDecoder decoder;
+        AVCodecParameters* parameters = avcodec_parameters_alloc();
+        if (!parameters) throw std::bad_alloc();
+        parameters->codec_type = AVMEDIA_TYPE_AUDIO; parameters->codec_id = AV_CODEC_ID_OPUS;
+        parameters->sample_rate = 48000; parameters->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
+        try { decoder.Open(*parameters, AVRational{1, 1000000}); }
+        catch (...) { avcodec_parameters_free(&parameters); throw; }
+        avcodec_parameters_free(&parameters);
+        qint64 media_origin = 0;
         int encoded_audio = 0, decoded_audio = 0, ready = 0;
         qint64 last_audio = -1;
         CameraEncoder encoder([&](bool video, QByteArray bytes, qint64 pts) {
             if (video) return;
             if (pts <= last_audio) throw std::runtime_error("audio timestamp did not advance");
             last_audio = pts; ++encoded_audio;
-            MediaBatch batch; decoder.Decode(false, bytes, pts, batch);
+            MediaBatch batch; decoder.DecodeUnit(bytes, pts, pts, media_origin, batch);
             decoded_audio += batch.audio.size();
         });
         const qint64 origin = CaptureClockUs();

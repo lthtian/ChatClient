@@ -41,7 +41,9 @@ CameraWindow::CameraWindow(bool publishing, QWidget* parent)
     : QDialog(parent, Qt::Window), publishing_(publishing), title_(new QLineEdit(this)),
       status_(new QLabel(this)), start_(new QPushButton(QStringLiteral("开始"), this)),
       stop_(new QPushButton(publishing ? QStringLiteral("结束直播") : QStringLiteral("关闭观看"), this)),
-      view_(new VideoView(this)), surface_(new CameraSurface(this)) {
+      view_(new VideoView(this)), surface_(new CameraSurface(this)), playback_(view_, this) {
+    playback_.Configure(true, true);
+    connect(&playback_, &Playback::FramePresented, this, &CameraWindow::FramePresented);
     setWindowTitle(publishing ? QStringLiteral("摄像头直播") : QStringLiteral("观看摄像头直播"));
     setWindowFlag(Qt::WindowContextHelpButtonHint, false);
     setAttribute(Qt::WA_DeleteOnClose);
@@ -72,7 +74,7 @@ CameraWindow::CameraWindow(bool publishing, QWidget* parent)
     if (!publishing) {
         auto* mute = new QCheckBox(QStringLiteral("静音"), this);
         buttons->addWidget(mute);
-        connect(mute, &QCheckBox::toggled, this, [this](bool value) { audio_.SetVolume(70, value); });
+        connect(mute, &QCheckBox::toggled, this, [this](bool value) { playback_.Audio().SetVolume(70, value); });
     }
     buttons->addStretch(); layout->addLayout(buttons);
     connect(start_, &QPushButton::clicked, this, &CameraWindow::Start);
@@ -123,7 +125,8 @@ void CameraWindow::SetAuthorization(QJsonObject live, QJsonObject descriptor, co
     live_ = std::move(live);
     if (closing_) { Stop(); FinishClose(); return; }
     try {
-        const int rate = publishing_ ? 0 : audio_.Open();
+        playback_.Reset();
+        const int rate = publishing_ ? 0 : playback_.Audio().Open();
         auto* worker = new RtcConnection(std::move(descriptor), publishing_, rate, this);
         connection_ = worker;
         connect(worker, &RtcConnection::Status, status_, &QLabel::setText);
@@ -133,8 +136,8 @@ void CameraWindow::SetAuthorization(QJsonObject live, QJsonObject descriptor, co
         });
         connect(worker, &RtcConnection::Failed, status_, &QLabel::setText);
         connect(worker, &QThread::finished, this, [this, worker] {
-            connection_ = nullptr; worker->deleteLater(); timer_.stop(); audio_.Close();
-            playing_ = false; pictures_.clear(); UpdateControls(); FinishClose();
+            connection_ = nullptr; worker->deleteLater(); timer_.stop(); playback_.Close();
+            UpdateControls(); FinishClose();
         });
         if (publishing_) { worker->SetPicture(latest_); worker->SetMicrophone(microphone_->isChecked()); }
         worker->start(); timer_.start(); UpdateControls();
@@ -143,7 +146,7 @@ void CameraWindow::SetAuthorization(QJsonObject live, QJsonObject descriptor, co
 void CameraWindow::Stop() {
     if (camera_) camera_->stop();
     if (connection_) connection_->Stop();
-    timer_.stop(); audio_.Close(); playing_ = false; pictures_.clear();
+    timer_.stop(); playback_.Close();
     if (publishing_ && !LiveId().isEmpty() && !ending_) { ending_ = true; emit EndRequested(); }
     UpdateControls();
 }
@@ -153,7 +156,7 @@ void CameraWindow::SetEnded(const QString& error) {
         closing_ = false; show(); status_->setText(error); UpdateControls(); return;
     }
     live_ = {}; if (connection_) connection_->Stop();
-    timer_.stop(); audio_.Close(); status_->setText(QStringLiteral("直播已结束"));
+    timer_.stop(); playback_.Close(); status_->setText(QStringLiteral("直播已结束"));
     UpdateControls(); FinishClose();
 }
 void CameraWindow::closeEvent(QCloseEvent* event) {
@@ -172,29 +175,14 @@ void CameraWindow::UpdateControls() {
 void CameraWindow::Tick() {
     if (publishing_ || !connection_) return;
     try {
-        auto batch = connection_->TakeMedia();
-        for (auto& picture : batch.video) pictures_.push_back(std::move(picture));
-        // 直播保持接近当前时刻：只保留约 200ms 的最新画面，落后时重建设备时钟。
-        while (pictures_.size() > 16) pictures_.pop_front();
-        if (!pictures_.empty() && playing_ && pictures_.back().pts_us -
-            (audio_.IsOpen() ? audio_.PositionUs() : base_us_ + clock_.nsecsElapsed() / 1000) > 600000) {
-            playing_ = false; audio_.Restart(pictures_.back().pts_us - 150000);
+        // RTC 持续接收；GUI 只取走已解码批次，播放策略与 HTTP 直播共用。
+        playback_.Append(connection_->TakeMedia());
+        if (!playback_.IsRunning()) {
+            if (!playback_.TryStart(true)) return;
+            status_->setText(playback_.Audio().IsOpen() ? QStringLiteral("WebRTC 直播") : QStringLiteral("WebRTC 直播 · 无声播放"));
         }
-        if (!playing_ && !pictures_.empty() && (!audio_.IsOpen() || !batch.audio.isEmpty())) {
-            base_us_ = audio_.IsOpen() ? batch.audio.front().pts_us : pictures_.front().pts_us;
-            if (audio_.IsOpen()) audio_.Restart(base_us_);
-            clock_.start(); playing_ = true;
-            status_->setText(audio_.IsOpen() ? QStringLiteral("WebRTC 直播") : QStringLiteral("WebRTC 直播 · 无声播放"));
-        }
-        if (!playing_) return;
-        for (auto& block : batch.audio) if (block.pts_us + 20000 >= base_us_) audio_.Append(std::move(block));
-        audio_.Pump(false);
-        const qint64 position = audio_.IsOpen() ? audio_.PositionUs() : base_us_ + clock_.nsecsElapsed() / 1000;
-        QImage image; qint64 shown = 0;
-        while (!pictures_.empty() && pictures_.front().pts_us <= position + 10000) {
-            image = std::move(pictures_.front().image); shown = pictures_.front().pts_us; pictures_.pop_front();
-        }
-        if (!image.isNull()) { view_->SetImage(std::move(image)); emit FramePresented(shown); }
+        if (playback_.Tick() == Playback::Result::Buffering)
+            status_->setText(QStringLiteral("正在缓冲音视频"));
     } catch (const std::exception& error) {
         status_->setText(QString::fromUtf8(error.what())); connection_->Stop(); timer_.stop();
     }
