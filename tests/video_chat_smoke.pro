@@ -11,3 +11,4 @@ HEADERS += $$PWD/../mainwindow.h $$PWD/../media_transfer.h $$PWD/../tcpclient.h 
 RESOURCES += $$PWD/../resourse.qrc
 include($$PWD/../player/media_playback.pri)
 include($$PWD/../broadcast/desktop_broadcast.pri)
+include($$PWD/../rtc/camera_rtc.pri)

@@ -68,7 +68,7 @@ public slots:
     void setUser(int id, QString name);
     void recvHandler();
     void getImage(QString& name);
-    void sendVideo(); // 选择一个 MP4，发送到开始操作时的会话。
+    void sendVideo(); // 选择视频，发送到开始操作时的会话。
 
 
 private:
@@ -121,6 +121,7 @@ private:
     void requestMediaHistory(const QJsonObject& conversation, const QString& before, quint64 generation); // 分页取得含媒体元数据的历史。
     void handleMediaMessage(const QJsonObject& conversation, const QJsonObject& message); // 实时通知与发送确认共用入口。
     void appendVideoMessage(const QJsonObject& conversation, const QJsonObject& message); // 显示文件名、大小及下载播放按钮。
+    void describeVideo(QWidget* card, const QJsonObject& conversation, const QJsonObject& media); // 按服务端描述更新卡片。
     void showMediaHistory(const QJsonObject& conversation); // 将已收齐的记录交给消息展示。
     void setupLive(); // 连接创建入口和有界状态刷新。
     void createLive(); // 在当前聊天创建直播卡片。

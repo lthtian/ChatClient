@@ -12,6 +12,7 @@
 
 #include "public.h"
 #include "tcpclient.h"
+#include "player/media_decoder.h"
 
 namespace
 {
@@ -20,14 +21,38 @@ constexpr qint64 kChunk = 64 * 1024;
 
 QString identifier() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
 
-bool isMp4(const QString& name)
-{
-    return QFileInfo(name).suffix().compare(QStringLiteral("mp4"), Qt::CaseInsensitive) == 0;
-}
 }  // namespace
 
-MediaTransfer::MediaTransfer(MyTcpClient* client, QObject* parent) : QObject(parent), client_(client)
+MediaTransfer::MediaTransfer(MyTcpClient* client, QObject* parent)
+    : QObject(parent), client_(client), probe_(new MediaDecoder)
 {
+    qRegisterMetaType<MediaSource>();
+    qRegisterMetaType<MediaBatch>();
+    probe_->moveToThread(&probeThread_);
+    connect(&probeThread_, &QThread::finished, probe_, &QObject::deleteLater);
+    connect(this, &MediaTransfer::probeOpenRequested, probe_, &MediaDecoder::Open, Qt::QueuedConnection);
+    connect(this, &MediaTransfer::probeReadRequested, probe_, &MediaDecoder::Read, Qt::QueuedConnection);
+    connect(this, &MediaTransfer::probeCloseRequested, probe_, &MediaDecoder::Close, Qt::QueuedConnection);
+    connect(probe_, &MediaDecoder::Opened, this, [this](quint64 generation, qint64, bool, qint64) {
+        if (generation == generation_ && probing_) emit probeReadRequested(generation);
+    });
+    connect(probe_, &MediaDecoder::BatchReady, this, [this](quint64 generation, MediaBatch batch) {
+        if (generation != generation_ || !probing_) return;
+        if (!batch.video.isEmpty()) {
+            probing_ = false;
+            probeDeadline_.stop();
+            emit probeCloseRequested(generation);
+            emit phaseChanged(QStringLiteral("计算视频摘要"), true);
+            hashNext(generation);
+        } else if (batch.eof) finish(QStringLiteral("文件中没有可解码的视频画面"));
+        else emit probeReadRequested(generation);
+    });
+    connect(probe_, &MediaDecoder::Failed, this, [this](quint64 generation, const QString& error) {
+        if (generation == generation_ && probing_) finish(QStringLiteral("视频预检失败：") + error);
+    });
+    probeDeadline_.setSingleShot(true);
+    connect(&probeDeadline_, &QTimer::timeout, this, [this] { finish(QStringLiteral("视频预检超时")); });
+    probeThread_.start();
     const QString root = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
     if (!root.isEmpty()) directory_ = QDir(root).filePath("ChatClient/videos");
     deadline_.setSingleShot(true);
@@ -37,11 +62,26 @@ MediaTransfer::MediaTransfer(MyTcpClient* client, QObject* parent) : QObject(par
 
 MediaTransfer::~MediaTransfer()
 {
+    probe_->RequestSession(++generation_);
+    probeThread_.requestInterruption();
+    probeThread_.quit();
+    probeThread_.wait();
     if (reply_)
     {
         disconnect(reply_, nullptr, this, nullptr);
         reply_->abort();
     }
+}
+
+QString MediaTransfer::playbackError(const QJsonObject& description)
+{
+    const auto state = description["state"].toString();
+    if (state == "recognized") return {};
+    if (state == "missing") return QStringLiteral("缺少媒体描述，请重新上传");
+    if (state == "pending") return QStringLiteral("服务端正在识别媒体");
+    if (state == "not_video") return QStringLiteral("文件中没有视频轨道，封面图不能作为视频播放");
+    if (state == "unrecognized") return QStringLiteral("文件损坏或不属于支持的视频容器");
+    return QStringLiteral("媒体识别失败，请重新上传或检查服务端处理程序");
 }
 
 void MediaTransfer::request(const QString& operation, QJsonObject fields, Completion complete)
@@ -119,11 +159,11 @@ void MediaTransfer::sendVideo(const QJsonObject& conversation, const QString& pa
         return;
     }
     source_ = std::make_unique<QFile>(path);
-    if (!isMp4(path) || !source_->open(QIODevice::ReadOnly) || source_->size() <= 0 ||
+    if (!source_->open(QIODevice::ReadOnly) || source_->size() <= 0 ||
         source_->size() > kLimit)
     {
         source_.reset();
-        emit failed(QStringLiteral("请选择可读取的 MP4，大小必须为 1 字节至 100 MiB"));
+        emit failed(QStringLiteral("请选择可读取的视频文件，大小必须为 1 字节至 100 MiB"));
         return;
     }
     busy_ = true;
@@ -135,8 +175,13 @@ void MediaTransfer::sendVideo(const QJsonObject& conversation, const QString& pa
     hash_.reset();
     const quint64 generation = ++generation_;
     deadline_.start(30 * 60 * 1000);
-    emit phaseChanged(QStringLiteral("计算视频摘要"), true);
-    hashNext(generation);
+    probing_ = true;
+    probeDeadline_.start(15000);
+    probe_->RequestSession(generation);
+    MediaSource source;
+    source.location = QFileInfo(path).absoluteFilePath();
+    emit phaseChanged(QStringLiteral("检查视频轨道与首帧"), true);
+    emit probeOpenRequested(source, generation);
 }
 
 void MediaTransfer::hashNext(quint64 generation)
@@ -197,6 +242,8 @@ void MediaTransfer::beginUpload(quint64 generation)
                 mediaId_ = data["media_id"].toString();
                 if (data["state"].toString() == "ready")
                 {
+                    const auto error = playbackError(data["description"].toObject());
+                    if (!error.isEmpty()) { finish(error); return; }
                     publish(generation);
                     return;
                 }
@@ -217,7 +264,7 @@ void MediaTransfer::upload(const QJsonObject& descriptor, quint64 generation)
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
     request.setHeader(QNetworkRequest::ContentLengthHeader, total_);
     request.setAttribute(QNetworkRequest::DoNotBufferUploadDataAttribute, true);
-    emit phaseChanged(QStringLiteral("上传视频"), true);
+    emit phaseChanged(QStringLiteral("上传视频并等待服务端识别"), true);
     auto* reply = network_.put(request, source_.get());
     reply_ = reply;
     connect(reply, &QNetworkReply::uploadProgress, this,
@@ -256,6 +303,8 @@ void MediaTransfer::upload(const QJsonObject& descriptor, quint64 generation)
                                       finish(QStringLiteral("服务端尚未确认文件可用"));
                                       return;
                                   }
+                                  const auto recognized = playbackError(data["description"].toObject());
+                                  if (!recognized.isEmpty()) { finish(recognized); return; }
                                   publish(generation);
                               });
             });
@@ -286,7 +335,7 @@ QString MediaTransfer::cachedVideoPath(const QJsonObject& media) const
 {
     const QString hash = media["sha256"].toString();
     if (directory_.isEmpty() || !QRegularExpression("^[0-9a-f]{64}$").match(hash).hasMatch()) return {};
-    const QFileInfo file(QDir(directory_).filePath(hash + ".mp4"));
+    const QFileInfo file(QDir(directory_).filePath(hash + ".media"));
     return file.isFile() && file.size() > 0 && file.size() == media["bytes"].toVariant().toLongLong()
                ? file.absoluteFilePath()
                : QString();
@@ -296,9 +345,9 @@ void MediaTransfer::requestPlaybackSource(const QJsonObject& conversation, const
                                           const QString& rendition, SourceCompletion complete)
 {
     const QString id = media["media_id"].toString();
-    if (!isMp4(media["name"].toString()) || !QRegularExpression("^[0-9a-f]{32}$").match(id).hasMatch())
+    if (!QRegularExpression("^[0-9a-f]{32}$").match(id).hasMatch())
     {
-        complete({}, QStringLiteral("请选择聊天中的 MP4 视频"));
+        complete({}, QStringLiteral("请选择有效的聊天文件"));
         return;
     }
     request("read", {{"conversation", conversation}, {"media_id", id}, {"variant", "playback"}},
@@ -308,6 +357,10 @@ void MediaTransfer::requestPlaybackSource(const QJsonObject& conversation, const
                 if (!error.isEmpty()) { complete({}, error); return; }
                 try
                 {
+                    const auto recognized = playbackError(data["description"].toObject());
+                    if (!recognized.isEmpty()) { complete({}, recognized); return; }
+                    if (data["format"].toString() != "original" && data["format"].toString() != "hls")
+                        throw std::runtime_error("invalid playback format");
                     const auto descriptor = data["download"].toObject();
                     const auto request = makeRequest(descriptor, "GET");
                     MediaSource source;
@@ -360,9 +413,9 @@ void MediaTransfer::downloadVideo(const QJsonObject& conversation, const QJsonOb
         return;
     }
     const QString id = media["media_id"].toString();
-    if (!isMp4(media["name"].toString()) || !QRegularExpression("^[0-9a-f]{32}$").match(id).hasMatch())
+    if (!QRegularExpression("^[0-9a-f]{32}$").match(id).hasMatch())
     {
-        emit failed(QStringLiteral("本阶段只支持打开 MP4 文件"));
+        emit failed(QStringLiteral("请选择有效的聊天文件"));
         return;
     }
     if (directory_.isEmpty() || !QDir().mkpath(directory_))
@@ -387,13 +440,15 @@ void MediaTransfer::downloadVideo(const QJsonObject& conversation, const QJsonOb
                 }
                 try
                 {
+                    const auto recognized = playbackError(data["description"].toObject());
+                    if (!recognized.isEmpty()) { finish(recognized); return; }
                     total_ = data["bytes"].toVariant().toLongLong();
                     expectedHash_ = data["sha256"].toString();
                     if (total_ <= 0 || total_ > kLimit ||
                         !QRegularExpression("^[0-9a-f]{64}$").match(expectedHash_).hasMatch())
                         throw std::runtime_error("invalid media length or checksum");
                     // 授权成功后才使用缓存；内容摘要作为文件名，不依赖进程内的路径记录。
-                    path_ = QDir(directory_).filePath(expectedHash_ + ".mp4");
+                    path_ = QDir(directory_).filePath(expectedHash_ + ".media");
                     cached_ = std::make_unique<QFile>(path_);
                     if (cached_->open(QIODevice::ReadOnly) && cached_->size() == total_)
                     {
@@ -530,6 +585,10 @@ void MediaTransfer::readDownload(QNetworkReply* reply, quint64 generation)
 void MediaTransfer::finish(const QString& error)
 {
     ++generation_;
+    probing_ = false;
+    probeDeadline_.stop();
+    probe_->RequestSession(generation_);
+    emit probeCloseRequested(generation_);
     deadline_.stop();
     if (reply_)
     {

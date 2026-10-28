@@ -2,6 +2,7 @@
 #include <QBuffer>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -61,6 +62,35 @@ QByteArray digest(const QString& path)
     require(hash.addData(&file), "cannot hash verification file");
     return hash.result();
 }
+
+void preflight(const QString& folder)
+{
+    MyTcpClient client;
+    MediaTransfer transfer(&client);
+    QSignalSpy errors(&transfer, &MediaTransfer::failed);
+    QSignalSpy phases(&transfer, &MediaTransfer::phaseChanged);
+    for (const auto* name : {"invalid.mp4", "truncated.mp4", "external.m3u8", "audio-cover.m4a"}) {
+        errors.clear();
+        phases.clear();
+        transfer.sendVideo({{"is_group", false}, {"target", 2}}, QDir(folder).filePath(name));
+        waitFor([&] { return !errors.isEmpty(); }, "preflight did not reject invalid input");
+        require(errors.size() == 1 && errors.first().first().toString().startsWith(QStringLiteral("视频预检失败：")),
+                "input did not fail during media preflight");
+        require(!transfer.busy() && phases.size() == 1 &&
+                    phases.first().first().toString() == QStringLiteral("检查视频轨道与首帧"),
+                "rejected input reached hashing or upload");
+        std::cout << "PASS preflight " << name << '\n';
+    }
+    errors.clear();
+    transfer.sendVideo({{"is_group", false}, {"target", 2}}, QDir(folder).filePath("video-h265.mkv"));
+    QElapsedTimer elapsed;
+    elapsed.start();
+    transfer.cancel();
+    require(elapsed.elapsed() < 200 && !transfer.busy(), "preflight cancellation blocked GUI");
+    QTest::qWait(50);
+    require(errors.isEmpty(), "canceled preflight delivered a stale failure");
+    std::cout << "PASS preflight cancel\n";
+}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -70,7 +100,11 @@ int main(int argc, char** argv)
     QApplication::setQuitOnLastWindowClosed(false);
     try
     {
-        require(argc == 2 || argc == 3, "usage: video_chat_smoke sample.mp4 [--expiry|--no-audio-device]");
+        require(argc == 2 || argc == 3, "usage: video_chat_smoke sample [--expiry|--no-audio-device|--preflight]");
+        if (argc == 3 && QString::fromLocal8Bit(argv[2]) == "--preflight") {
+            preflight(QString::fromLocal8Bit(argv[1]));
+            return 0;
+        }
         const bool checkExpiry = argc == 3 && QString::fromLocal8Bit(argv[2]) == "--expiry";
         const bool noAudio = argc == 3 && QString::fromLocal8Bit(argv[2]) == "--no-audio-device";
         // 平台插件已加载；限定本进程后续插件搜索路径，使真实 Qt 音频后端不可用。
@@ -146,6 +180,8 @@ int main(int argc, char** argv)
         require(!sender.findChild<QProgressDialog*>()->isVisible(), "upload dialog stayed open");
         waitFor([&] { return receiver.findChild<QPushButton*>("playVideoButton") != nullptr; },
                 "live video message missing");
+        waitFor([&] { return receiver.findChild<QPushButton*>("onlineVideoButton")->isEnabled(); },
+                "server description did not enable video playback");
         // 在线入口经过真实聊天鉴权，FFmpeg 直接读取同一个服务器上的视频。
         const auto videoMedia = published.first()[1].toJsonObject()["media"].toObject();
         const QString previousCache = receiving->cachedVideoPath(videoMedia);
@@ -301,6 +337,14 @@ int main(int argc, char** argv)
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         waitFor([&] { return receiver.findChildren<QPushButton*>("playVideoButton").size() == 1; },
                 "video history missing or duplicated");
+        waitFor([&] { return receiver.findChild<QPushButton*>("onlineVideoButton")->isEnabled(); },
+                "history video was not recognized");
+        receiver.findChild<QPushButton*>("onlineVideoButton")->click();
+        auto* historyPlayer = receiver.findChild<MediaWindow*>();
+        waitFor([&] { return !historyPlayer->CurrentImage().isNull() || historyPlayer->state() == MediaWindow::State::Error; },
+                "history playback did not start");
+        require(historyPlayer->state() != MediaWindow::State::Error, qPrintable(historyPlayer->ErrorText()));
+        delete historyPlayer;
         const int previous = receiver.findChild<QListWidget*>("chatHistory")->count();
         sender.findChild<MyTextEdit*>()->setPlainText("stage6 text check");
         sender.sendMessage();
@@ -315,7 +359,7 @@ int main(int argc, char** argv)
         std::cout << "CachePath: " << cachePath.toStdString() << '\n';
         receiver.close();
         sender.close();
-        std::cout << "PASS: real MP4 upload, push, download SHA256, playback, paused seek, history, text, "
+        std::cout << "PASS: real video upload, push, download SHA256, playback, paused seek, history, text, "
                      "dialogs, cache reuse, damaged cache repair, cancel, online playback/seek/no disk cache\n";
         return 0;
     }

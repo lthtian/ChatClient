@@ -10,12 +10,14 @@
 #include <QPointer>
 #include <QSaveFile>
 #include <QTimer>
+#include <QThread>
 #include <functional>
 #include <memory>
 
 #include "player/media_source.h"
 
 class MyTcpClient;
+class MediaDecoder;
 
 // GUI 线程中的文件业务：TCP 申请授权，HTTP 分块传输，发布后才形成聊天消息。
 class MediaTransfer : public QObject
@@ -30,7 +32,8 @@ class MediaTransfer : public QObject
     void request(const QString& operation, QJsonObject fields,
                  Completion complete);                                     // 发控制请求，回调返回数据或错误。
     void handleResponse(const QJsonObject& response);                      // 按 request_id 分发 msgid 27。
-    void sendVideo(const QJsonObject& conversation, const QString& path);  // 哈希、上传并发布一个 MP4。
+    void sendVideo(const QJsonObject& conversation, const QString& path);  // 后台预检、哈希、上传并发布视频。
+    static QString playbackError(const QJsonObject& description);  // 服务端识别状态对应的用户提示。
     void downloadVideo(const QJsonObject& conversation,
                        const QJsonObject& media);             // 授权下载并校验，完成后交付本地路径。
     QString cachedVideoPath(const QJsonObject& media) const;  // 返回长度匹配的缓存路径，播放前仍校验摘要。
@@ -47,7 +50,10 @@ class MediaTransfer : public QObject
     void finished();                                                       // 任务结束，界面可关闭进度展示。
     void failed(QString message);                                          // 展示本次任务的失败原因。
     void messagePublished(QJsonObject conversation, QJsonObject message);  // 服务端确认入库后的正式消息。
-    void fileReady(QString path);  // 完整下载且通过长度、SHA-256 校验的 MP4。
+    void fileReady(QString path);  // 完整下载且通过长度、SHA-256 校验的视频。
+    void probeOpenRequested(MediaSource source, quint64 generation);
+    void probeReadRequested(quint64 generation);
+    void probeCloseRequested(quint64 generation);
 
    private:
     struct Pending
@@ -70,6 +76,10 @@ class MediaTransfer : public QObject
     void connectionLost();                                     // TCP 断开后让等待中的控制请求失败。
 
     MyTcpClient* client_;                                  // 借用聊天连接，其登录会话绑定媒体凭证。
+    QThread probeThread_;
+    MediaDecoder* probe_;  // 工作线程独占 FFmpeg；原子代次用于取消。
+    QTimer probeDeadline_;
+    bool probing_ = false;
     QNetworkAccessManager network_;                        // 本线程的 HTTP 请求管理器。
     QHash<QString, Pending> pending_;                      // request_id 到控制请求回调。
     QString directory_;                                    // 系统缓存目录中的 ChatClient/videos，退出不删除。

@@ -145,7 +145,7 @@ void MainWindow::setupUI()
     QHBoxLayout *bLayout = new QHBoxLayout();
     bLayout->setContentsMargins(20, 0, 20, 14);
     bLayout->setSpacing(12);
-    videoButton = new QPushButton(QStringLiteral("发送 MP4"), this);
+    videoButton = new QPushButton(QStringLiteral("发送视频"), this);
     videoButton->setObjectName("sendVideoButton");
     videoButton->setFixedHeight(36);
     bLayout->addWidget(videoButton);

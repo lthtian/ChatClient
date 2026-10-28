@@ -5,6 +5,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QProgressDialog>
 #include <QStatusBar>
 #include <algorithm>
@@ -57,8 +58,7 @@ void MainWindow::setupMedia()
                 for (auto* button : messageList->findChildren<QPushButton*>("playVideoButton"))
                 {
                     const QJsonObject media = QJsonObject::fromVariantMap(button->property("media").toMap());
-                    if (QFileInfo(media["name"].toString()).suffix().compare("mp4", Qt::CaseInsensitive) != 0)
-                        continue;
+                    if (!button->property("videoRecognized").toBool()) continue;
                     const QString cached = media_->cachedVideoPath(media);
                     button->setEnabled(true);
                     button->setText(cached.isEmpty() ? QStringLiteral("下载并播放") : QStringLiteral("播放"));
@@ -138,7 +138,7 @@ void MainWindow::sendVideo()
         return;
     }
     const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("发送视频"), QString(),
-                                                      QStringLiteral("MP4 视频 (*.mp4 *.MP4)"));
+        QStringLiteral("视频 (*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.ts *.flv *.ogv);;所有文件 (*)"));
     if (!path.isEmpty()) media_->sendVideo(conversation, path);
 }
 
@@ -273,10 +273,9 @@ void MainWindow::appendVideoMessage(const QJsonObject& conversation, const QJson
     label->setTextFormat(Qt::PlainText);
     label->setToolTip(name);
     layout->addWidget(label);
-    const bool mp4 = QFileInfo(name).suffix().compare("mp4", Qt::CaseInsensitive) == 0;
     auto* footer = new QHBoxLayout;
     auto* details = new QLabel(QStringLiteral("%1 · %2 MiB")
-                                   .arg(mp4 ? QStringLiteral("MP4 视频") : QStringLiteral("文件"))
+                                   .arg(QStringLiteral("读取媒体描述"))
                                    .arg(media["bytes"].toDouble() / (1024 * 1024), 0, 'f', 2),
                                card);
     details->setObjectName("videoDetails");
@@ -285,21 +284,19 @@ void MainWindow::appendVideoMessage(const QJsonObject& conversation, const QJson
     auto* online = new QPushButton(QStringLiteral("在线播放"), card);
     online->setObjectName("onlineVideoButton");
     online->setFixedHeight(32);
-    online->setEnabled(mp4);
+    online->setEnabled(false);
     online->setToolTip(QStringLiteral("边接收边播放，不保存本地视频文件"));
     footer->addWidget(online);
     connect(online, &QPushButton::clicked, this,
             [this, conversation, media] { playOnlineVideo(conversation, media); });
     const QString cached = media_->cachedVideoPath(media);
     auto* open =
-        new QPushButton(mp4 ? (cached.isEmpty() ? QStringLiteral("下载并播放") : QStringLiteral("播放"))
-                            : QStringLiteral("暂不支持播放"),
-                        card);
+        new QPushButton(QStringLiteral("读取媒体描述"), card);
     open->setObjectName("playVideoButton");
     open->setProperty("media", media.toVariantMap());
     open->setFixedHeight(32);
-    open->setToolTip(cached.isEmpty() ? QStringLiteral("仅支持 MP4，完整下载后播放") : cached);
-    open->setEnabled(mp4 && !media_->busy());
+    open->setToolTip(cached.isEmpty() ? QStringLiteral("完整下载并校验后播放") : cached);
+    open->setEnabled(false);
     footer->addWidget(open);
     layout->addLayout(footer);
     // 发出的文件靠右，收到的文件靠左；卡片内部的文件名与操作按钮保持相邻。
@@ -312,6 +309,47 @@ void MainWindow::appendVideoMessage(const QJsonObject& conversation, const QJson
     item->setSizeHint(QSize(0, 170));
     messageList->addItem(item);
     messageList->setItemWidget(item, row);
+    describeVideo(card, conversation, media);
+}
+
+void MainWindow::describeVideo(QWidget* card, const QJsonObject& conversation, const QJsonObject& media)
+{
+    const QPointer<QWidget> target(card);
+    media_->request("read", {{"conversation", conversation}, {"media_id", media["media_id"]}, {"variant", "description"}},
+        [this, target, media](const QJsonObject& data, const QString& error) {
+            if (!target) return;
+            auto* online = target->findChild<QPushButton*>("onlineVideoButton");
+            auto* open = target->findChild<QPushButton*>("playVideoButton");
+            auto* details = target->findChild<QLabel*>("videoDetails");
+            const auto description = data["description"].toObject();
+            const auto failure = error.isEmpty() ? MediaTransfer::playbackError(description) : error;
+            const bool recognized = failure.isEmpty();
+            open->setProperty("videoRecognized", recognized);
+            online->setEnabled(recognized);
+            open->setEnabled(recognized && !media_->busy());
+            const QString cached = media_->cachedVideoPath(media);
+            open->setText(recognized ? (cached.isEmpty() ? QStringLiteral("下载并播放") : QStringLiteral("播放")) :
+                          QStringLiteral("无法播放"));
+            open->setToolTip(recognized ? cached : failure);
+            online->setToolTip(recognized ? QStringLiteral("边接收边播放，不保存本地视频文件") : failure);
+            QString summary = failure;
+            if (recognized) {
+                const auto demuxer = description["demuxer"].toString();
+                summary = demuxer == "mov" ? "MP4/MOV" : demuxer == "matroska" ? "Matroska/WebM" : demuxer.toUpper();
+                for (const auto& value : description["tracks"].toArray()) {
+                    const auto track = value.toObject();
+                    if (track["index"] != description["video_stream"]) continue;
+                    summary += QStringLiteral(" · %1 · %2×%3").arg(track["codec"].toString().toUpper())
+                        .arg(track["width"].toInt()).arg(track["height"].toInt());
+                    const auto fps = track["average_frame_rate"].toArray();
+                    if (fps.size() == 2 && fps[1].toDouble() > 0)
+                        summary += QStringLiteral(" · %1 fps").arg(fps[0].toDouble() / fps[1].toDouble(), 0, 'f', 2);
+                }
+            }
+            summary += QStringLiteral(" · %1 MiB").arg(media["bytes"].toDouble() / (1024 * 1024), 0, 'f', 2);
+            details->setToolTip(summary);
+            details->setText(details->fontMetrics().elidedText(summary, Qt::ElideRight, 346));
+        });
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

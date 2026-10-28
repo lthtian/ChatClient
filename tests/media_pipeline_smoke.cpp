@@ -6,6 +6,7 @@
 #include "video_view.h"
 #include <QApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -71,14 +72,26 @@ QJsonObject FileDecode(const QString& file, const QString& reference, int expect
 }
 
 // 原播放器实际运行解码线程、设备协商与公共播放组件，验证暂停和定位。
-QJsonObject WindowPlayback(const QString& file, const QString& output) {
+QJsonObject WindowPlayback(const QString& file, const QString& output, const QString& url = {}) {
   MediaWindow window;
+  QDir().mkpath(output);
+  if (!url.isEmpty()) {
+    QObject::connect(&window, &MediaWindow::AuthorizationRequested, [&](quint64 session, const QString&) {
+      MediaSource source;
+      source.kind = MediaSource::Kind::Http;
+      source.location = url;
+      source.headers = "X-Lab: media-samples\r\n";
+      source.expires_at_ms = QDateTime::currentMSecsSinceEpoch() + 60000;
+      window.SetOnlineSource(session, source, {});
+    });
+  }
+  const auto open = [&] { if (url.isEmpty()) window.OpenFile(file); else window.OpenOnline(file); };
   auto* playback = window.findChild<Playback*>();
   Require(playback, "window has no shared Playback");
   playback->Audio().SetVolume(0, true);
   int frames = 0;
   QObject::connect(&window, &MediaWindow::FramePresented, [&](qint64) { ++frames; });
-  window.OpenFile(file);
+  open();
   Wait([&] { return window.state() == MediaWindow::State::Error || frames >= 4; }, "file did not start");
   Require(window.state() != MediaWindow::State::Error, qPrintable(window.ErrorText()));
   window.TogglePlayback();
@@ -92,7 +105,7 @@ QJsonObject WindowPlayback(const QString& file, const QString& output) {
   window.TogglePlayback();
   Wait([&] { return frames > preview_frames && window.PositionUs() > 2400000; }, "seek resume did not advance");
   Require(window.grab().save(output + "/file-player.png"), "cannot save player render");
-  window.OpenFile(file); window.OpenFile(file);
+  open(); open();
   Wait([&] { return window.state() == MediaWindow::State::Error || window.state() == MediaWindow::State::Playing; }, "reopen timed out");
   Require(window.state() == MediaWindow::State::Playing, qPrintable(window.ErrorText()));
   window.SeekTo(window.DurationUs() - 200000);
@@ -180,13 +193,14 @@ QJsonObject RtcMedia(const QString& output) {
 int main(int argc, char** argv) {
   QApplication app(argc, argv);
   av_log_set_level(AV_LOG_ERROR);
-  if (argc != 5) return 2;
+  if (argc != 5 && argc != 6) return 2;
   try {
     const QString file = QString::fromLocal8Bit(argv[1]), reference = QString::fromLocal8Bit(argv[2]);
     const QString output = QString::fromLocal8Bit(argv[4]); QDir().mkpath(output);
     QJsonObject result;
     result["file_decode"] = FileDecode(file, reference, QString::fromLocal8Bit(argv[3]).toInt());
     result["window"] = WindowPlayback(file, output);
+    if (argc == 6) result["http_window"] = WindowPlayback(file, output + "/http", QString::fromLocal8Bit(argv[5]));
     result["rtc"] = RtcMedia(output);
     QFile report(output + "/result.json"); Require(report.open(QIODevice::WriteOnly), "cannot write report");
     report.write(QJsonDocument(result).toJson());

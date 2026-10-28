@@ -39,7 +39,7 @@ bool MediaDecoder::Canceled() const {
 int MediaDecoder::Interrupted(void* opaque) {
   auto* self = static_cast<MediaDecoder*>(opaque);
   return self->Canceled() ||
-         (self->online_ && std::chrono::steady_clock::now() >= self->io_deadline_);
+         std::chrono::steady_clock::now() >= self->io_deadline_;
 }
 
 void MediaDecoder::BeginIo() {
@@ -55,6 +55,12 @@ void MediaDecoder::OpenInput(const MediaSource& source) {
   if (!raw) throw std::bad_alloc();
   raw->interrupt_callback = {Interrupted, this};
   AVDictionary* options = nullptr;
+  if (!source.IsHls() && !source.IsLive()) {
+    av_dict_set(&options, "format_whitelist", "mov,matroska,webm,avi,mpegts,flv,ogg", 0);
+    av_dict_set(&options, "enable_drefs", "0", 0);
+    av_dict_set(&options, "max_streams", "64", 0);
+  }
+  if (!online_) av_dict_set(&options, "protocol_whitelist", "file", 0);
   if (online_) {
     // HTTP 的读和 seek 由 FFmpeg 实现；不用 cache: 协议，不生成临时视频文件。
     av_dict_set(&options, "headers", source.headers.constData(), 0);
@@ -75,12 +81,18 @@ void MediaDecoder::OpenInput(const MediaSource& source) {
     av_dict_set(&options, "analyzeduration", "2000000", 0);
   }
   BeginIo();
-  const int result = avformat_open_input(&raw, source.location.toUtf8().constData(),
-      online_ ? av_find_input_format(source.IsHls() ? "hls" :
-          source.kind == MediaSource::Kind::LiveFlv ? "flv" : "mov") : nullptr, &options);
+  const AVInputFormat* format = source.IsHls() ? av_find_input_format("hls") :
+      source.kind == MediaSource::Kind::LiveFlv ? av_find_input_format("flv") : nullptr;
+  const int result = avformat_open_input(&raw, source.location.toUtf8().constData(), format, &options);
   av_dict_free(&options);
   input_.reset(raw);
   Check(result, "avformat_open_input");
+  if (!source.IsHls()) {
+    // 单文件与 FLV 输入不需要打开额外资源；HLS 子请求使用独立的业务授权边界。
+    input_->io_open = [](AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) {
+      return AVERROR(EACCES);
+    };
+  }
   // HLS 根据时间索引选分片，不通过 m3u8 的字节定位能力判断能否 seek。
   if (source.kind == MediaSource::Kind::Http && (!input_->pb || !(input_->pb->seekable & AVIO_SEEKABLE_NORMAL)))
     throw std::runtime_error("服务端未提供可定位的 HTTP 视频输入");
