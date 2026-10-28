@@ -8,9 +8,9 @@
 #include <QThread>
 #include <QTimer>
 #include <QWidget>
-#include <deque>
 
-#include "audio_output.h"
+#include "playback.h"
+#include "media_decoder.h"
 #include "video_view.h"
 
 class QLabel;
@@ -51,7 +51,7 @@ class MediaWindow : public QWidget {
   void Stop();  // 清掉声音和缓存并回到零；下一次播放从头定位。
   QJsonObject DiagnosticSnapshot() const;  // GUI 线程采样，时间单位微秒。
   State state() const { return state_; }  // 获取当前播放状态。
-  bool HasAudioOutput() const { return audio_.IsOpen(); }  // 是否实际启用了声音设备。
+  bool HasAudioOutput() const { return playback_.Audio().IsOpen(); }  // 是否实际启用了声音设备。
   qint64 PositionUs() const;              // 获取公共媒体时间轴上的播放位置。
   qint64 DurationUs() const {
     return duration_us_;
@@ -83,7 +83,6 @@ class MediaWindow : public QWidget {
   void StartSeek(qint64 position_us,
                  bool play_after);     // 清 GUI/设备状态并发起定位。
   void AcceptBatch(MediaBatch batch);  // 接收拥有独立内存的结果并检查缓存上限。
-  qint64 BufferAheadUs(qint64 requested_us) const; // 按单帧内存计算音视频共同的预读时间上限。
   void RequestData();                  // 在媒体准备不足且无在途请求时继续读包。
   void TryStart();  // 首批数据准备好后开始播放或显示暂停预览。
   void Tick();      // 补音频、读取时钟、选择到期画面并检查结束。
@@ -117,9 +116,7 @@ class MediaWindow : public QWidget {
   MediaDecoder* decoder_;  // 工作线程拥有操作权，由 finished/deleteLater 销毁。
   QThread thread_;         // GUI 线程中的线程管理对象，内部运行解码事件循环。
   QTimer timer_;           // 10ms 唤醒调度，不把 timeout 次数当作播放时间。
-  AudioOutput audio_;      // GUI 线程中的音频输出和 PCM 缓冲。
-  QElapsedTimer clock_;    // 无音轨或音轨先结束时使用的单调时钟。
-  std::deque<VideoPicture> pictures_;  // 声画交错读取产生的少量待显示画面。
+  Playback playback_;  // GUI 中共用的缓存、设备时钟和画面调度。
   State state_ = State::Empty;         // 当前界面与播放控制状态。
   MediaSource source_;                // 本地路径或 HTTP 描述，后续解码与播放共用。
   bool awaiting_authorization_ = false;  // 有一个尚未返回的业务授权请求。
@@ -127,17 +124,12 @@ class MediaWindow : public QWidget {
   QString error_;                      // 当前错误说明。
   quint64 session_ = 0;                // 打开、seek、停止递增，屏蔽旧结果。
   qint64 duration_us_ = 0;             // 总时长，单位微秒。
-  qint64 audio_end_us_ = -1;           // 容器描述的音轨结束时间，未知为 -1。
-  qint64 base_us_ = 0;                 // 暂停位置或单调时钟锚点。
-  qint64 last_video_end_us_ = 0;       // 最近显示画面的结束位置。
-  qint64 picture_bytes_ = 0;           // 当前画面缓存字节量，限制为 64 MiB。
+  qint64 base_us_ = 0;                 // 打开、定位或暂停时保存的目标位置。
   bool opened_ = false;                // 后台文件是否已打开成功。
   bool in_flight_ = false;             // 是否已有尚未返回的 Read 请求。
-  bool eof_ = false;                   // 后台是否已经排空全部媒体数据。
   bool play_after_buffering_ = true;   // 打开或 seek 准备完成后的播放意图。
   bool resume_after_drag_ = false;     // 拖动前是否播放，释放后恢复相同状态。
   bool silent_audio_ = false;          // 文件有音轨但无输出设备，界面说明无声播放。
-  bool audio_clock_ = false;           // 是否正在使用设备消费进度作为主时钟。
   QTimer reconnect_timer_;             // 直播重连等待，不阻塞 GUI。
   int reconnect_attempts_ = 0;         // 连续失败次数，实际起播后清零。
   bool live_ended_ = false;            // 业务已结束后禁止重连。

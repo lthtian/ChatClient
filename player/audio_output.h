@@ -7,7 +7,7 @@
 #include <deque>
 #include <memory>
 
-#include "media_decoder.h"
+#include "media_types.h"
 
 // GUI 线程中的设备输出。只接收目标格式 PCM，不负责解码或显示画面。
 class AudioOutput {

@@ -119,7 +119,7 @@ void Geometry(const QString& samples, const QString& output, QJsonArray& records
   view.SetImage(rtc_picture.image); QTest::qWait(20);
   Require(ColoredBounds(view.grab().toImage()).size() == QSize(800, 600), "RTC default geometry mismatch");
 }
-void Playback(const QString& samples, const QString& output, QJsonArray& records) {
+void PlaybackControls(const QString& samples, const QString& output, QJsonArray& records) {
   qputenv("CHAT_MEDIA_TRACE", (output + "/timeline.jsonl").toLocal8Bit());
   MediaWindow player; player.show();
   player.OpenFile(samples + "/base.mp4"); Ready(player);
@@ -223,7 +223,7 @@ int main(int argc, char** argv) {
     const QString samples = QString::fromLocal8Bit(argv[1]), output = QString::fromLocal8Bit(argv[2]);
     Require(QDir().mkpath(output), "cannot create result directory");
     QJsonArray records;
-    Geometry(samples, output, records); Playback(samples, output, records);
+    Geometry(samples, output, records); PlaybackControls(samples, output, records);
     QFile result(output + "/result.json"); Require(result.open(QIODevice::WriteOnly), "cannot write result");
     result.write(QJsonDocument(records).toJson());
     std::cout << "PASS geometry, actual decoding, pause, seek, reopen, audio gaps and VFR\n";

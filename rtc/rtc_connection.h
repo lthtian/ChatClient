@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "media_decoder.h"
+#include "media_types.h"
 #include <QJsonObject>
 #include <QThread>
 #include <memory>
@@ -11,7 +11,7 @@ public:
     RtcConnection(QJsonObject descriptor, bool publishing, int output_rate, QObject* parent = nullptr);
     ~RtcConnection() override; // 正常关闭等 finished 后销毁；析构提供最后的生命周期保护。
     void SetPicture(QImage image); // 替换最新摄像头画面，不积累待编码画面。
-    void SetMicrophone(bool enabled); // 原子开关；设备只在编码线程创建/释放。
+    void SetMicrophone(bool enabled); // 原子开关；麦克风设备由采集线程创建/释放。
     void Stop(); // 原子取消网络等待和媒体循环，不阻塞 GUI。
     MediaBatch TakeMedia(); // GUI 取走当前批次，锁只保护移动操作。
 signals:

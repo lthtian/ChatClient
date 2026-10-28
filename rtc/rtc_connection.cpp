@@ -1,5 +1,6 @@
 ﻿#include "rtc_connection.h"
 #include "media_codec.h"
+#include "track_decoder.h"
 #include "audio_capture.h"
 #include "microphone_capture.h"
 #include "rtp.h"
@@ -229,7 +230,20 @@ void RtcConnection::run() {
                 msleep(2);
             }
         } else {
-            CameraDecoder decoder(d->rate);
+            TrackDecoder video_decoder, audio_decoder;
+            std::unique_ptr<AVCodecParameters, void (*)(AVCodecParameters*)> parameters(
+                avcodec_parameters_alloc(), [](AVCodecParameters* p) { avcodec_parameters_free(&p); });
+            if (!parameters) throw std::bad_alloc();
+            parameters->codec_type = AVMEDIA_TYPE_VIDEO; parameters->codec_id = AV_CODEC_ID_H264;
+            video_decoder.Open(*parameters, AVRational{1, 1000000}, 33333);
+            video_decoder.SetVideoLimit(QSize(1920, 1080));
+            if (d->rate) {
+                parameters->codec_type = AVMEDIA_TYPE_AUDIO; parameters->codec_id = AV_CODEC_ID_OPUS;
+                parameters->sample_rate = 48000; parameters->ch_layout = AV_CHANNEL_LAYOUT_STEREO;
+                audio_decoder.Open(*parameters, AVRational{1, 1000000});
+                audio_decoder.SetOutputRate(d->rate);
+            }
+            qint64 media_origin = AV_NOPTS_VALUE; // 两轨 SR 映射后的共同起点，不分别归零。
             camera::ReorderBuffer vq, aq;
             camera::H264Assembler assembler;
             struct Unit { bool video; QByteArray bytes; quint32 timestamp; };
@@ -255,7 +269,7 @@ void RtcConnection::run() {
                 auto pli = [&] { if (now - last_pli >= 500000) { vt->requestKeyframe(); last_pli = now; } };
                 vq.Drain(now, [&](const camera::RtpPacket& packet) {
                     assembler.Push(packet, [&](QByteArray bytes, quint32 timestamp) { enqueue(true, std::move(bytes), timestamp); });
-                }, [&](qint64) { assembler.Lost(); decoder.ResetVideo(); pli(); });
+                }, [&](qint64) { assembler.Lost(); video_decoder.Reset(); pli(); });
                 aq.Drain(now, [&](const camera::RtpPacket& packet) { enqueue(false, packet.payload, packet.timestamp); }, [](qint64) {});
                 const auto vsync = vr->getSyncTimestamps(), async = ar->getSyncTimestamps();
                 // 两条 SR 将独立的 RTP 起点映射到公共 NTP；不能把音视频分别归零。
@@ -263,8 +277,10 @@ void RtcConnection::run() {
                     MediaBatch batch;
                     while (!pending.empty()) {
                         auto item = std::move(pending.front()); pending.pop_front(); pending_bytes -= item.bytes.size();
-                        decoder.Decode(item.video, item.bytes,
-                            TimeUs(item.video ? vsync : async, item.timestamp, item.video ? 90000 : 48000), batch);
+                        const qint64 time = TimeUs(item.video ? vsync : async, item.timestamp, item.video ? 90000 : 48000);
+                        // 当前 RTC 编码无 B 帧，访问单元的解码和显示时刻一致。
+                        if (item.video || d->rate)
+                            (item.video ? video_decoder : audio_decoder).DecodeUnit(item.bytes, time, time, media_origin, batch);
                         // 首份 SR 到达前可能已经积累一个 GOP；解码参考链，播放只保留最近约 200ms。
                         while (batch.video.size() > 6) batch.video.removeFirst();
                         while (batch.audio.size() > 12) batch.audio.removeFirst();
