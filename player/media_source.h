@@ -24,6 +24,8 @@ struct MediaSource {
   QVector<MediaRendition> renditions;   // 仅包含服务端返回的可用档位。
   QString rendition;                  // 当前档位；续签时保留选择。
   QString processing_notice;          // 原件可播而 HLS 排队、处理中或失败时的说明。
+  int audio_stream = -2;              // -2 按默认标记选择，-1 无声，其余为输入内的轨道索引。
+  QVector<int> excluded_audio;        // 本次播放已经失败的音轨，重新打开时不再自动尝试。
   bool IsOnline() const { return kind != Kind::LocalFile; }  // 是否需要网络读取策略。
   bool IsLive() const { return kind == Kind::LiveFlv || kind == Kind::LiveHls; }  // 禁用点播定位与历史位置恢复。
   bool IsHls() const { return kind == Kind::Hls || kind == Kind::LiveHls; }  // 使用 HLS 解封装器。

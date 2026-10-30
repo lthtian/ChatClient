@@ -1,6 +1,7 @@
 ﻿#include <QApplication>
 #include <QBuffer>
 #include <QCryptographicHash>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
@@ -35,21 +36,56 @@ void waitFor(const std::function<bool()>& ready, const char* message, int timeou
     require(ready(), message);
 }
 
+void waitForPicture(MediaWindow* player, const char* message)
+{
+    require(player != nullptr, "player window missing");
+    waitFor([&] { return !player->CurrentImage().isNull() || player->state() == MediaWindow::State::Error; },
+            message);
+    require(player->state() != MediaWindow::State::Error, qPrintable(player->ErrorText()));
+}
+
+void checkAudioTracks(MediaWindow* player)
+{
+    if (qEnvironmentVariableIntValue("CHAT_TEST_AUDIO_TRACKS") != 2) return;
+    auto* tracks = player->findChild<QComboBox*>("mediaAudioTrack");
+    require(tracks && tracks->count() == 3 && tracks->currentData().toInt() == 2,
+            "shared file lost its default audio track");
+    const qint64 position = player->PositionUs();
+    const int index = tracks->findData(1);
+    require(index >= 0, "shared alternate audio track missing");
+    tracks->setCurrentIndex(index);
+    QMetaObject::invokeMethod(tracks, "activated", Qt::DirectConnection, Q_ARG(int, index));
+    waitFor([&] { return player->state() == MediaWindow::State::Paused ||
+                        player->state() == MediaWindow::State::Error; }, "shared audio switch timed out", 30000);
+    require(player->state() == MediaWindow::State::Paused && player->PositionUs() == position &&
+                player->DiagnosticSnapshot()["audio_stream"].toInt() == 1,
+            "shared audio switch lost selection or paused position");
+    std::cout << "PASS: shared audio default, alternate selection and paused position" << std::endl;
+}
+
 QJsonObject exchange(MyTcpClient& client, const QJsonObject& request, int expected)
 {
     QJsonObject response;
+    QStringList received;
     client.sendJson(request);
-    waitFor(
+    try { waitFor(
         [&]
         {
             for (QByteArray bytes = client.read(); !bytes.isEmpty(); bytes = client.read())
             {
                 auto value = QJsonDocument::fromJson(bytes).object();
+                received.append(QString::number(value["msgid"].toInt()));
                 if (value["msgid"].toInt() == expected) response = value;
             }
             return !response.isEmpty();
         },
-        "control response timeout");
+        "control response timeout"); }
+    catch (const std::exception&) {
+        throw std::runtime_error(QString("control response timeout: request=%1 expected=%2 received=[%3] socket=%4 error=%5 pending=%6")
+            .arg(request["msgid"].toInt()).arg(expected).arg(received.join(','))
+            .arg(client.getSocket()->state()).arg(client.getSocket()->errorString())
+            .arg(client.getSocket()->bytesToWrite()).toStdString());
+    }
     require(response["errno"].toInt() == 0, "account operation rejected");
     return response;
 }
@@ -209,6 +245,7 @@ int main(int argc, char** argv)
                             online->state() == MediaWindow::State::Error; }, "online seek timed out", 30000);
         require(online->state() == MediaWindow::State::Paused, qPrintable(online->ErrorText()));
         require(online->PositionUs() == seekAt && !online->CurrentImage().isNull(), "online preview failed");
+        checkAudioTracks(online);
         require(downloaded.isEmpty() && receiving->cachedVideoPath(videoMedia) == previousCache &&
                     QFileInfo(previousCache).lastModified() == cacheTime, "online playback changed disk cache");
         online->grab().save("stage7-online-player.png");
@@ -276,7 +313,9 @@ int main(int argc, char** argv)
         QTest::qWait(30);
         QElapsedTimer closeElapsed;
         closeElapsed.start();
+        std::cerr << "BEGIN cancel online input" << std::endl;
         delete receiver.findChild<MediaWindow*>();
+        std::cerr << "END cancel online input" << std::endl;
         require(closeElapsed.elapsed() < 2000, "closing online input blocked GUI");
         receiver.findChild<QPushButton*>("playVideoButton")->click();
         waitFor([&] { return !downloaded.isEmpty() || !errorsB.isEmpty(); }, "download timed out", 120000);
@@ -297,7 +336,10 @@ int main(int argc, char** argv)
         require(!player->CurrentImage().isNull(), "decoded picture missing");
         player->TogglePlayback();
         player->SeekTo(2000000);
-        waitFor([&] { return player->state() == MediaWindow::State::Paused; }, "paused seek failed");
+        waitFor([&] { return player->state() == MediaWindow::State::Paused ||
+                            player->state() == MediaWindow::State::Error; }, "paused seek timed out");
+        require(player->state() == MediaWindow::State::Paused, qPrintable(player->ErrorText()));
+        checkAudioTracks(player);
         player->grab().save("stage6-player.png");
         delete player;
         receiver.findChild<QPushButton*>("playVideoButton")->click();
@@ -305,7 +347,10 @@ int main(int argc, char** argv)
         require(downloaded.size() == 2 && downloaded.last().first().toString() == cachePath &&
                     downloads == initialDownloads && QFileInfo(cachePath).lastModified() == cacheModified,
                 "cache was downloaded again");
+        waitForPicture(receiver.findChild<MediaWindow*>(), "cached video did not produce a picture");
+        std::cerr << "BEGIN cancel cached input" << std::endl;
         delete receiver.findChild<MediaWindow*>();
+        std::cerr << "END cancel cached input" << std::endl;
         {
             MediaTransfer reopened(&clients[1]);
             const QJsonObject media = published.first()[1].toJsonObject()["media"].toObject();
@@ -324,7 +369,10 @@ int main(int argc, char** argv)
         require(downloaded.size() == 3 && downloads == initialDownloads + 1 &&
                     digest(cachePath) == digest(sample),
                 "damaged cache was reused");
+        waitForPicture(receiver.findChild<MediaWindow*>(), "repaired video did not produce a picture");
+        std::cerr << "BEGIN cancel repaired input" << std::endl;
         delete receiver.findChild<MediaWindow*>();
+        std::cerr << "END cancel repaired input" << std::endl;
         QTest::qWait(50);
         require(!receiver.findChild<QProgressDialog*>()->isVisible(), "cache dialog stayed open");
         receiver.grab().save("stage7-chat.png");

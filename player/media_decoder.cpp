@@ -1,10 +1,15 @@
 ﻿#include "media_decoder.h"
 
 #include <QFileInfo>
+#include <QStringList>
 #include <QThread>
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+
+extern "C" {
+#include <libavutil/pixdesc.h>
+}
 
 namespace {
 constexpr AVRational kUs{1, AV_TIME_BASE};
@@ -13,6 +18,16 @@ void Check(int result, const char* api) {
   char message[AV_ERROR_MAX_STRING_SIZE]{};
   av_strerror(result, message, sizeof(message));
   throw std::runtime_error(std::string(api) + ": " + message);
+}
+QString Metadata(const AVStream* stream, const char* key) {
+  const auto* value = av_dict_get(stream->metadata, key, nullptr, 0);
+  return value ? QString::fromUtf8(value->value) : QString();
+}
+QString TrackError(const MediaTrack& track, const QString& phase, const QString& detail) {
+  return QStringLiteral("%1轨道 #%2（%3%4）%5：%6")
+      .arg(track.type == "audio" ? QStringLiteral("音频") : QStringLiteral("视频"))
+      .arg(track.index).arg(track.codec)
+      .arg(track.profile.isEmpty() ? QString() : " / " + track.profile).arg(phase, detail);
 }
 }  // namespace
 
@@ -112,16 +127,7 @@ void MediaDecoder::Open(MediaSource source, quint64 session) {
     OpenInput(source);
     Check(avformat_find_stream_info(input_.get(), nullptr),
           "avformat_find_stream_info");
-    for (unsigned i = 0; i < input_->nb_streams; ++i) {
-      const auto* stream = input_->streams[i];
-      if (!video_stream_ &&
-          stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
-          !(stream->disposition & AV_DISPOSITION_ATTACHED_PIC))
-        video_stream_ = stream;
-      if (!audio_stream_ && stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
-        audio_stream_ = stream;
-    }
-    if (!video_stream_) throw std::runtime_error("文件中没有视频流");
+    SelectTracks(source);
     // 两条轨道必须减去同一个起点，否则原有的声画起始偏移会被抹掉。
     origin_us_ = input_->start_time == AV_NOPTS_VALUE ? 0 : input_->start_time;
     seek_origin_us_ = origin_us_;
@@ -135,17 +141,6 @@ void MediaDecoder::Open(MediaSource source, quint64 session) {
         throw std::runtime_error("HLS 首包缺少解码时间戳，无法确定定位起点");
       seek_origin_us_ = av_rescale_q(packet_->dts,
           input_->streams[packet_->stream_index]->time_base, kUs);
-    }
-    const AVRational rate = av_guess_frame_rate(
-        input_.get(), input_->streams[video_stream_->index], nullptr);
-    frame_duration_us_ = rate.num > 0 && rate.den > 0
-                             ? av_rescale_q(1, av_inv_q(rate), kUs)
-                             : 40000;
-    video_.Open(*video_stream_->codecpar, video_stream_->time_base, frame_duration_us_,
-                video_stream_->sample_aspect_ratio);
-    if (audio_stream_) {
-      audio_.Open(*audio_stream_->codecpar, audio_stream_->time_base);
-      audio_.SetOutputRate(output_rate_);
     }
     qint64 duration = live_ || input_->duration == AV_NOPTS_VALUE ? 0 : input_->duration;
     qint64 audio_end = -1;
@@ -161,10 +156,130 @@ void MediaDecoder::Open(MediaSource source, quint64 session) {
     // 直播可能从非零时刻的 GOP 加入。第一份解码输出建立两轨共同起点，不能等待过去的时间。
     if (live_) origin_us_ = AV_NOPTS_VALUE;
     if (!live_) emit TimelineReady(session_, origin_us_, seek_origin_us_);
+    emit TracksReady(session_, tracks_);
     emit Opened(session_, std::max<qint64>(0, duration), audio_.IsOpen(),
                 audio_end);
   } catch (const std::exception& e) {
     if (!Canceled()) emit Failed(session_, QString::fromUtf8(e.what()));
+  }
+}
+
+void MediaDecoder::SelectTracks(const MediaSource& source) {
+  tracks_ = {};
+  for (unsigned i = 0; i < input_->nb_streams; ++i) {
+    const auto* stream = input_->streams[i];
+    const auto* p = stream->codecpar;
+    MediaTrack track;
+    track.index = stream->index;
+    track.type = QString::fromUtf8(av_get_media_type_string(p->codec_type));
+    track.codec = QString::fromUtf8(avcodec_get_name(p->codec_id));
+    track.profile = QString::fromUtf8(avcodec_profile_name(p->codec_id, p->profile));
+    track.language = Metadata(stream, "language");
+    track.title = Metadata(stream, "title");
+    if (track.title.isEmpty()) track.title = Metadata(stream, "handler_name");
+    track.is_default = stream->disposition & AV_DISPOSITION_DEFAULT;
+    track.attached_picture = stream->disposition & AV_DISPOSITION_ATTACHED_PIC;
+    track.decoder_available = avcodec_find_decoder(p->codec_id) != nullptr;
+    if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
+      const auto* pixel = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(p->format));
+      const QString fps = stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0 ?
+          QStringLiteral("%1/%2").arg(stream->avg_frame_rate.num).arg(stream->avg_frame_rate.den) : QStringLiteral("未知");
+      track.format = QStringLiteral("%1×%2 · %3 · %4 bit · 平均 %5 fps")
+          .arg(p->width).arg(p->height).arg(pixel ? QString::fromUtf8(pixel->name) : "?")
+          .arg(pixel && pixel->nb_components > 0 ? QString::number(pixel->comp[0].depth) : "?").arg(fps);
+    } else if (p->codec_type == AVMEDIA_TYPE_AUDIO) {
+      char layout[128]{};
+      av_channel_layout_describe(&p->ch_layout, layout, sizeof(layout));
+      const char* sample = av_get_sample_fmt_name(static_cast<AVSampleFormat>(p->format));
+      track.format = QStringLiteral("%1 Hz · %2 · %3").arg(p->sample_rate).arg(QString::fromUtf8(layout))
+          .arg(sample ? QString::fromUtf8(sample) : QStringLiteral("采样格式未知"));
+    }
+    if ((track.type == "audio" || track.type == "video") && !track.decoder_available) {
+      track.failure = "decoder_missing";
+      track.error = TrackError(track, QStringLiteral("不可用"), QStringLiteral("本机 FFmpeg 没有对应解码器"));
+    }
+    if (track.type == "audio" && source.excluded_audio.contains(track.index)) {
+      track.failure = "decode_failed";
+      track.error = TrackError(track, QStringLiteral("不可用"), QStringLiteral("本次播放中解码失败"));
+    }
+    tracks_.items.push_back(std::move(track));
+  }
+  for (const QString& type : {QStringLiteral("video"), QStringLiteral("audio")}) {
+    QVector<int> candidates;
+    for (int i = 0; i < tracks_.items.size(); ++i)
+      if (tracks_.items[i].type == type && !tracks_.items[i].attached_picture) candidates.push_back(i);
+    std::stable_sort(candidates.begin(), candidates.end(), [&](int a, int b) {
+      const auto rank = [&](int i) {
+        const auto& track = tracks_.items[i];
+        return type == "audio" && track.index == source.audio_stream ? 2 : track.is_default ? 1 : 0;
+      };
+      return rank(a) > rank(b);
+    });
+    QStringList failures;
+    for (int index : candidates) {
+      auto& track = tracks_.items[index];
+      if (!track.error.isEmpty()) { failures.push_back(track.error); continue; }
+      if (type == "audio" && source.audio_stream == -1) continue;
+      const auto* stream = input_->streams[track.index];
+      try {
+        if (type == "video") {
+          const AVRational rate = av_guess_frame_rate(input_.get(), input_->streams[track.index], nullptr);
+          frame_duration_us_ = rate.num > 0 && rate.den > 0 ? av_rescale_q(1, av_inv_q(rate), kUs) : 40000;
+          video_.Open(*stream->codecpar, stream->time_base, frame_duration_us_, stream->sample_aspect_ratio);
+          video_stream_ = stream;
+          tracks_.video = track.index;
+        } else {
+          audio_.Open(*stream->codecpar, stream->time_base);
+          audio_.SetOutputRate(output_rate_);
+          audio_stream_ = stream;
+          tracks_.audio = track.index;
+        }
+        break;
+      } catch (const std::exception& e) {
+        if (Canceled()) throw;
+        (type == "video" ? video_ : audio_).Close();
+        track.failure = "decoder_init";
+        track.error = TrackError(track, QStringLiteral("初始化失败"), QString::fromUtf8(e.what()));
+        failures.push_back(track.error);
+      }
+    }
+    if (type == "video" && !video_stream_)
+      throw std::runtime_error((candidates.isEmpty() ? QStringLiteral("文件中没有非封面视频轨道") :
+          failures.join("；")).toStdString());
+    if (type == "audio") {
+      if (source.audio_stream == -1) tracks_.audio_notice = QStringLiteral("无声播放（已关闭音轨）");
+      else if (candidates.isEmpty()) tracks_.audio_notice = QStringLiteral("无声播放（文件没有音轨）");
+      else if (!audio_stream_) tracks_.audio_notice = QStringLiteral("无声播放（%1 条音轨均不可用）：%2")
+          .arg(candidates.size()).arg(failures.value(0));
+      else if (!failures.isEmpty()) tracks_.audio_notice = QStringLiteral("已选用可用音轨；") + failures.front();
+    }
+  }
+}
+
+void MediaDecoder::DecodeVideo(MediaBatch& batch, bool drain) {
+  try {
+    const auto canceled = [this] { return Canceled(); };
+    if (drain) video_.Drain(origin_us_, batch, canceled);
+    else video_.Decode(packet_.get(), origin_us_, batch, canceled);
+  } catch (const std::exception& e) {
+    throw std::runtime_error(TrackError(tracks_.items[video_stream_->index],
+        QStringLiteral("解码或图像转换失败"), QString::fromUtf8(e.what())).toStdString());
+  }
+}
+
+void MediaDecoder::DecodeAudio(MediaBatch& batch, bool drain) {
+  if (!audio_.IsOpen() || !decode_audio_) return;
+  try {
+    const auto canceled = [this] { return Canceled(); };
+    if (drain) audio_.Drain(origin_us_, batch, canceled);
+    else audio_.Decode(packet_.get(), origin_us_, batch, canceled);
+  } catch (const std::exception& e) {
+    if (Canceled()) return;
+    const auto& track = tracks_.items[audio_stream_->index];
+    audio_.Close();
+    batch.audio.clear();
+    emit AudioFailed(session_, track.index,
+        TrackError(track, QStringLiteral("解码或音频转换失败"), QString::fromUtf8(e.what())));
   }
 }
 
@@ -216,21 +331,20 @@ void MediaDecoder::Read(quint64 session) {
     BeginIo();
     MediaBatch batch;
     const bool awaiting_origin = origin_us_ == AV_NOPTS_VALUE;
-    const auto canceled = [this] { return Canceled(); };
     if (!eof_) {
       const int result = packet_pending_ ? 0 : av_read_frame(input_.get(), packet_.get());
       packet_pending_ = false;
       if (result == AVERROR_EOF) {
         // 读完容器不等于播放完：先交出两条轨道及重采样器的尾部数据。
-        video_.Drain(origin_us_, batch, canceled);
-        if (audio_.IsOpen() && decode_audio_) audio_.Drain(origin_us_, batch, canceled);
+        DecodeVideo(batch, true);
+        DecodeAudio(batch, true);
         eof_ = true;
       } else {
         Check(result, "av_read_frame");
         if (packet_->stream_index == video_stream_->index)
-          video_.Decode(packet_.get(), origin_us_, batch, canceled);
+          DecodeVideo(batch, false);
         else if (decode_audio_ && audio_stream_ && packet_->stream_index == audio_stream_->index)
-          audio_.Decode(packet_.get(), origin_us_, batch, canceled);
+          DecodeAudio(batch, false);
       }
       av_packet_unref(packet_.get());
     }

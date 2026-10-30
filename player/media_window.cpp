@@ -10,7 +10,9 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QMessageBox>
 #include <QPushButton>
+#include <QStandardItemModel>
 #include <QShortcut>
 #include <QStyleOptionSlider>
 #include <QVBoxLayout>
@@ -74,6 +76,8 @@ MediaWindow::MediaWindow()
       volume_(new QSlider(Qt::Horizontal, this)),
       status_(new QLabel(this)),
       quality_(new QComboBox(this)),
+      audio_tracks_(new QComboBox(this)),
+      audio_notice_(new QLabel(this)),
       decoder_(new MediaDecoder),
       playback_(view_, this) {
   connect(&playback_, &Playback::FramePresented, this, [this](qint64 pts) {
@@ -92,6 +96,7 @@ MediaWindow::MediaWindow()
   }
   qRegisterMetaType<MediaBatch>();
   qRegisterMetaType<MediaSource>();
+  qRegisterMetaType<MediaTracks>();
   setWindowTitle(QString::fromUtf8("音视频播放器"));
   resize(960, 640);
   setMinimumSize(600, 360);
@@ -136,11 +141,24 @@ void MediaWindow::CreateControls() {
   quality_->hide();
   controls->addWidget(quality_);
   connect(quality_, QOverload<int>::of(&QComboBox::activated), this, &MediaWindow::ChangeRendition);
+  audio_tracks_->setObjectName("mediaAudioTrack");
+  audio_tracks_->setToolTip(QStringLiteral("音轨"));
+  audio_tracks_->setMaximumWidth(260);
+  controls->addWidget(audio_tracks_);
+  connect(audio_tracks_, QOverload<int>::of(&QComboBox::activated), this, &MediaWindow::ChangeAudio);
+  auto* details = new QPushButton(QStringLiteral("轨道信息"), this);
+  controls->addWidget(details);
+  connect(details, &QPushButton::clicked, this, &MediaWindow::ShowTracks);
   controls->addWidget(fullscreen);
   auto* layout = new QVBoxLayout(this);
   layout->addWidget(view_, 1);
   layout->addWidget(progress_);
   layout->addWidget(status_);
+  audio_notice_->setObjectName("mediaAudioNotice");
+  audio_notice_->setTextFormat(Qt::PlainText);
+  audio_notice_->setWordWrap(true);
+  audio_notice_->hide();
+  layout->addWidget(audio_notice_);
   layout->addLayout(controls);
   connect(open, &QPushButton::clicked, this, [this] {
     const QString file = QFileDialog::getOpenFileName(
@@ -189,6 +207,21 @@ void MediaWindow::CreateControls() {
 }
 
 void MediaWindow::ConnectDecoder() {
+  connect(decoder_, &MediaDecoder::TracksReady, this, [this](quint64 session, MediaTracks tracks) {
+    if (session != session_) { ++stale_results_; return; }
+    tracks_ = std::move(tracks);
+    UpdateTracks();
+  });
+  connect(decoder_, &MediaDecoder::AudioFailed, this, [this](quint64 session, int stream, QString message) {
+    if (session != session_) { ++stale_results_; return; }
+    audio_failure_ = message;
+    MediaSource selected = source_;
+    selected.excluded_audio.push_back(stream);
+    selected.audio_stream = -2;
+    const bool play = state_ == State::Playing || (state_ == State::Buffering && play_after_buffering_);
+    // 共用重开和定位流程，清除失败音轨已经交付的 PCM、设备队列及其时钟。
+    OpenSource(std::move(selected), source_.IsLive() ? 0 : PositionUs(), play);
+  });
   connect(decoder_, &MediaDecoder::TimelineReady, this,
       [this](quint64 session, qint64 origin, qint64 seek_origin) {
     if (session != session_) { ++stale_results_; return; }
@@ -241,7 +274,8 @@ void MediaWindow::ConnectDecoder() {
                 }
               } else
                 status_->setToolTip(
-                    QString::fromUtf8("此文件没有音轨，使用单调时钟"));
+                    tracks_.audio_notice);
+              UpdateTracks();
               Trace("opened");
               // 重新授权后是重新打开容器，要先恢复媒体位置再继续送包。
               if (!source_.IsLive() && base_us_ > 0) {
@@ -290,6 +324,70 @@ void MediaWindow::ConnectDecoder() {
           });
 }
 
+void MediaWindow::UpdateTracks() {
+  audio_tracks_->clear();
+  audio_tracks_->addItem(QStringLiteral("关闭音轨"), -1);
+  auto* model = qobject_cast<QStandardItemModel*>(audio_tracks_->model());
+  for (const auto& track : tracks_.items) {
+    if (track.type != "audio") continue;
+    QString text = QStringLiteral("#%1 · %2").arg(track.index).arg(track.codec);
+    if (!track.language.isEmpty()) text += " · " + track.language;
+    if (!track.title.isEmpty()) text += " · " + track.title;
+    if (track.is_default) text += QStringLiteral(" · 默认");
+    if (!track.error.isEmpty()) text += QStringLiteral(" · 不可用");
+    audio_tracks_->addItem(text, track.index);
+    const int row = audio_tracks_->count() - 1;
+    audio_tracks_->setItemData(row, track.error.isEmpty() ? track.format : track.error, Qt::ToolTipRole);
+    if (model && !track.error.isEmpty()) model->item(row)->setEnabled(false);
+  }
+  audio_tracks_->setCurrentIndex(std::max(0, audio_tracks_->findData(tracks_.audio)));
+  audio_tracks_->setVisible(audio_tracks_->count() > 1);
+  QString notice = tracks_.audio_notice;
+  if (!audio_failure_.isEmpty()) notice += (notice.isEmpty() ? "" : "；") + audio_failure_;
+  audio_notice_->setText(notice);
+  audio_notice_->setVisible(!notice.isEmpty());
+}
+
+void MediaWindow::ChangeAudio(int index) {
+  if (!opened_ || awaiting_authorization_ || index < 0 || index >= audio_tracks_->count()) return;
+  const int stream = audio_tracks_->itemData(index).toInt();
+  if (stream == tracks_.audio) return;
+  for (const auto& track : tracks_.items)
+    if (track.index == stream && !track.error.isEmpty()) return;
+  MediaSource selected = source_;
+  selected.audio_stream = stream;
+  const qint64 position = source_.IsLive() ? 0 : PositionUs();
+  const bool play = state_ == State::Playing || (state_ == State::Buffering && play_after_buffering_);
+  if (AuthorizationExpired()) {
+    selected.location.clear();
+    selected.headers.clear();
+    selected.expires_at_ms = 0;
+  }
+  OpenSource(std::move(selected), position, play);
+}
+
+void MediaWindow::ShowTracks() {
+  QStringList lines;
+  for (const auto& track : tracks_.items) {
+    QString line = QStringLiteral("#%1 %2 · %3 %4 · %5").arg(track.index)
+        .arg(track.type, track.codec, track.profile, track.format);
+    if (!track.language.isEmpty()) line += " · " + track.language;
+    if (!track.title.isEmpty()) line += " · " + track.title;
+    if (track.is_default) line += QStringLiteral(" · 默认");
+    if (track.attached_picture) line += QStringLiteral(" · 封面");
+    if (track.index == tracks_.audio || track.index == tracks_.video) line += QStringLiteral(" · 当前选择");
+    if (!track.error.isEmpty()) line += "\n" + track.error;
+    else if (track.type == "audio" || track.type == "video")
+      line += QStringLiteral("\n本机有解码器；实际可播性由初始化和解码结果确定");
+    lines.push_back(line);
+  }
+  QMessageBox box(this);
+  box.setWindowTitle(QStringLiteral("轨道信息"));
+  box.setTextFormat(Qt::PlainText);
+  box.setText(lines.isEmpty() ? QStringLiteral("尚未取得轨道信息") : lines.join("\n\n"));
+  box.exec();
+}
+
 void MediaWindow::UpdateRenditions() {
   quality_->clear();
   for (const auto& item : source_.renditions) {
@@ -308,6 +406,8 @@ void MediaWindow::ChangeRendition(int index) {
   MediaSource selected = source_;
   selected.rendition = item.id;
   selected.location = item.location;
+  selected.audio_stream = -2;
+  selected.excluded_audio.clear();
   // 列表和分片共用凭证；过期时携带所选档位重新授权。
   if (AuthorizationExpired()) {
     selected.location.clear();
@@ -324,6 +424,7 @@ void MediaWindow::ClearPending(qint64 position_us) {
   received_video_pts_us_ = received_audio_pts_us_ = presented_pts_us_ = -1;
 }
 void MediaWindow::OpenFile(const QString& filename) {
+  audio_failure_.clear();
   MediaSource source;
   source.location = filename;
   source.name = QFileInfo(filename).fileName();
@@ -331,6 +432,7 @@ void MediaWindow::OpenFile(const QString& filename) {
 }
 
 void MediaWindow::OpenOnline(const QString& name) {
+  audio_failure_.clear();
   MediaSource source;
   source.kind = MediaSource::Kind::Http;
   source.name = name;
@@ -338,6 +440,7 @@ void MediaWindow::OpenOnline(const QString& name) {
 }
 
 void MediaWindow::OpenLive(const QString& name, bool hls) {
+  audio_failure_.clear();
   reconnect_attempts_ = 0;
   live_ended_ = false;
   MediaSource source;
@@ -375,6 +478,8 @@ void MediaWindow::OpenSource(MediaSource source, qint64 position_us, bool play_a
   playback_.Close();
   ClearPending(position_us);
   source_ = std::move(source);
+  tracks_ = {};
+  UpdateTracks();
   timeline_known_ = false;
   playback_.Configure(source_.IsLive(), source_.IsOnline());
   UpdateRenditions();
@@ -411,6 +516,8 @@ void MediaWindow::SetOnlineSource(quint64 session, MediaSource source, const QSt
     Fail(QStringLiteral("无效或已过期的在线播放凭证"));
     return;
   }
+  source.audio_stream = source_.audio_stream;
+  source.excluded_audio = source_.excluded_audio;
   source_ = std::move(source);
   playback_.Configure(source_.IsLive(), source_.IsOnline());
   UpdateRenditions();
@@ -625,6 +732,8 @@ QJsonObject MediaWindow::DiagnosticSnapshot() const {
       {"state", QMetaEnum::fromType<State>().valueToKey(int(state_))},
       {"position_us", double(PositionUs())}, {"duration_us", double(duration_us_)},
       {"source_kind", int(source_.kind)},
+      {"video_stream", tracks_.video}, {"audio_stream", tracks_.audio},
+      {"audio_notice", audio_notice_->text()},
       {"origin_us", timeline_known_ ? QJsonValue(double(origin_us_)) : QJsonValue()},
       {"seek_origin_us", timeline_known_ ? QJsonValue(double(seek_origin_us_)) : QJsonValue()},
       {"video_received_pts_us", maybe_pts(received_video_pts_us_)},
@@ -671,6 +780,7 @@ void MediaWindow::UpdateControls() {
   stop_button_->setEnabled(state_ != State::Empty && state_ != State::Error);
   progress_->setEnabled(opened_ && duration_us_ > 0 && state_ != State::Error);
   progress_->setVisible(!source_.IsLive());
+  audio_tracks_->setEnabled(opened_ && !awaiting_authorization_ && state_ != State::Error);
   if (source_.IsLive() && live_ended_) {
     play_button_->setEnabled(false);
     status_->setText(QStringLiteral("直播已结束"));

@@ -37,6 +37,8 @@ class MediaDecoder : public QObject {
             quint64 session);  // 定位、清状态并切换会话编号。
 
  signals:
+  void TracksReady(quint64 session, MediaTracks tracks);
+  void AudioFailed(quint64 session, int stream, QString message);
   void TimelineReady(quint64 session, qint64 origin_us, qint64 seek_origin_us);
   void AudioDiscontinuity(quint64 session, qint64 actual_us, qint64 expected_us);
   void Opened(quint64 session, qint64 duration_us, bool has_audio,
@@ -50,6 +52,9 @@ class MediaDecoder : public QObject {
   bool Canceled() const;                // 当前请求是否已被 GUI 的更新代次替代。
   void BeginIo();                       // 为一次打开/读取/定位设置有限的网络等待时间。
   void OpenInput(const MediaSource& source);  // 两种输入的差异集中在此处。
+  void SelectTracks(const MediaSource& source);
+  void DecodeVideo(MediaBatch& batch, bool drain);
+  void DecodeAudio(MediaBatch& batch, bool drain);
   void ResetDecodeState(qint64 target_us);  // 清理临时帧、重采样器和时间计数。
 
   std::unique_ptr<AVFormatContext, void (*)(AVFormatContext*)>
@@ -59,6 +64,7 @@ class MediaDecoder : public QObject {
   std::unique_ptr<AVPacket, void (*)(AVPacket*)> packet_;  // 复用的容器输入包。
   const AVStream* video_stream_ = nullptr;  // 借用 input_ 的视频轨道。
   const AVStream* audio_stream_ = nullptr;  // 借用 input_ 的音频轨道，可为空。
+  MediaTracks tracks_;
   int output_rate_ = 48000;   // Qt 设备支持的目标采样率。
   quint64 session_ = 0;       // 打开/跳转代次，供 GUI 丢弃过期结果。
   std::atomic<quint64> requested_session_{0};  // GUI 与回调之间唯一共享的可变状态。

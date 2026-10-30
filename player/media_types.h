@@ -27,3 +27,20 @@ struct MediaBatch {
   bool eof = false;            // 输入与解码器及重采样器均已排空。
 };
 Q_DECLARE_METATYPE(MediaBatch)
+
+// 探测事实与本机打开结果分开记录；有解码器不代表轨道一定能打开。
+struct MediaTrack {
+  int index = -1;
+  QString type, codec, profile, language, title, format;
+  bool is_default = false;
+  bool attached_picture = false;
+  bool decoder_available = false;
+  QString failure, error;
+};
+struct MediaTracks {
+  QVector<MediaTrack> items;
+  int video = -1;
+  int audio = -1;
+  QString audio_notice;
+};
+Q_DECLARE_METATYPE(MediaTracks)

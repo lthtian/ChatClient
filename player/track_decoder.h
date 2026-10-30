@@ -36,7 +36,7 @@ class TrackDecoder {
  private:
   int Receive(qint64& origin_us, MediaBatch& batch,
               const std::function<bool()>& canceled);  // 收到需输入、EOF 或取消为止。
-  void ConvertVideo(qint64 origin_us, MediaBatch& batch);  // 转为拥有像素的 RGB 图像。
+  void ConvertVideo(qint64 origin_us, MediaBatch& batch, bool tail_preview = false);  // 转为拥有像素的 RGB 图像。
   void PrepareAudio();  // 按实际音频帧配置或核对转换器。
   int ConvertAudio(const AVFrame* source, qint64 origin_us,
                    MediaBatch& batch);  // 重采样、维护采样时间并裁掉目标前的数据。
@@ -44,6 +44,7 @@ class TrackDecoder {
   std::unique_ptr<AVCodecContext, void (*)(AVCodecContext*)> context_;  // 本轨道解码实例。
   std::unique_ptr<AVPacket, void (*)(AVPacket*)> packet_;  // 为网络访问单元提供带安全填充的编码缓冲。
   std::unique_ptr<AVFrame, void (*)(AVFrame*)> frame_;  // 顺序接收输出帧。
+  std::unique_ptr<AVFrame, void (*)(AVFrame*)> seek_frame_;  // 目标紧邻尾帧时保留解码帧引用，排空后提供预览。
   std::unique_ptr<AVFrame, void (*)(AVFrame*)> rgb_;    // 像素转换的目标帧。
   std::unique_ptr<SwsContext, void (*)(SwsContext*)> scaler_;  // 视频格式转换状态。
   std::unique_ptr<SwrContext, void (*)(SwrContext*)> resampler_;  // PCM 转换及内部延迟。
@@ -57,8 +58,10 @@ class TrackDecoder {
   QSize video_limit_;               // 协议输入选择的尺寸限制。
   qint64 target_us_ = 0;             // 允许输出的最早媒体位置。
   qint64 next_video_us_ = 0;         // 缺失视频时间戳时的连续估计。
+  qint64 seek_frame_pts_us_ = 0;     // 尾部候选帧当次计算的时间，避免再次转换时重复推进估计。
   qint64 frame_duration_us_ = 40000; // 缺失帧时长时的估计。
   qint64 audio_origin_us_ = 0;       // 当前连续 PCM 段的起始位置。
   qint64 audio_samples_ = 0;         // 已转换的每声道采样数。
   bool audio_started_ = false;       // 是否已经建立当前 PCM 段的时间起点。
+  bool delivered_video_ = false;
 };

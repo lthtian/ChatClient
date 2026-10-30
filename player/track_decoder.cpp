@@ -22,10 +22,11 @@ TrackDecoder::TrackDecoder()
     : context_(nullptr, [](AVCodecContext* p) { avcodec_free_context(&p); }),
       packet_(av_packet_alloc(), [](AVPacket* p) { av_packet_free(&p); }),
       frame_(av_frame_alloc(), [](AVFrame* p) { av_frame_free(&p); }),
+      seek_frame_(av_frame_alloc(), [](AVFrame* p) { av_frame_free(&p); }),
       rgb_(av_frame_alloc(), [](AVFrame* p) { av_frame_free(&p); }),
       scaler_(sws_alloc_context(), [](SwsContext* p) { sws_free_context(&p); }),
       resampler_(nullptr, [](SwrContext* p) { swr_free(&p); }) {
-  if (!packet_ || !frame_ || !rgb_ || !scaler_) throw std::bad_alloc();
+  if (!packet_ || !frame_ || !seek_frame_ || !rgb_ || !scaler_) throw std::bad_alloc();
   scaler_->flags = SWS_BILINEAR;
   scaler_->threads = 1;
 }
@@ -72,6 +73,8 @@ void TrackDecoder::Reset(qint64 target_us) {
   if (IsOpen()) avcodec_flush_buffers(context_.get());
   av_packet_unref(packet_.get());
   av_frame_unref(frame_.get());
+  av_frame_unref(seek_frame_.get());
+  delivered_video_ = false;
   av_frame_unref(rgb_.get());
   resampler_.reset();
   av_channel_layout_uninit(&source_layout_);
@@ -111,6 +114,12 @@ void TrackDecoder::DecodeUnit(const QByteArray& bytes, qint64 pts, qint64 dts,
 void TrackDecoder::Drain(qint64& origin_us, MediaBatch& batch,
                          const std::function<bool()>& canceled) {
   Decode(nullptr, origin_us, batch, canceled);
+  if (!Canceled(canceled) && !delivered_video_ && seek_frame_->buf[0]) {
+    av_frame_unref(frame_.get());
+    av_frame_move_ref(frame_.get(), seek_frame_.get());
+    ConvertVideo(origin_us, batch, true);
+    av_frame_unref(frame_.get());
+  }
   // 读完容器不等于播放完：PCM 转换器也可能保留尾部采样。
   if (resampler_)
     while (!Canceled(canceled) && ConvertAudio(nullptr, origin_us, batch) > 0) {}
@@ -135,13 +144,23 @@ int TrackDecoder::Receive(qint64& origin_us, MediaBatch& batch,
   }
   return AVERROR_EXIT;
 }
-void TrackDecoder::ConvertVideo(qint64 origin_us, MediaBatch& batch) {
-  const qint64 pts = frame_->best_effort_timestamp == AV_NOPTS_VALUE ? next_video_us_ :
+void TrackDecoder::ConvertVideo(qint64 origin_us, MediaBatch& batch, bool tail_preview) {
+  const qint64 pts = tail_preview ? seek_frame_pts_us_ :
+      frame_->best_effort_timestamp == AV_NOPTS_VALUE ? next_video_us_ :
       av_rescale_q(frame_->best_effort_timestamp, time_base_, kUs) - origin_us;
   const qint64 duration = std::max<qint64>(1, frame_->duration > 0 ?
       av_rescale_q(frame_->duration, time_base_, kUs) : frame_duration_us_);
   next_video_us_ = pts + duration;
-  if (next_video_us_ <= target_us_) return;
+  if (!tail_preview && next_video_us_ <= target_us_) {
+    av_frame_unref(seek_frame_.get());
+    // 容器时长与逐帧时间舍入可能相差一个流时基单位；只保留这一精度内的尾部候选。
+    if (!delivered_video_ && target_us_ > 0 &&
+        target_us_ - next_video_us_ < std::max<qint64>(1, av_rescale_q(1, time_base_, kUs))) {
+      Check(av_frame_ref(seek_frame_.get(), frame_.get()), "av_frame_ref");
+      seek_frame_pts_us_ = pts;
+    }
+    return;
+  }
   if (frame_->width <= 0 || frame_->height <= 0 ||
       (!video_limit_.isEmpty() && (frame_->width > video_limit_.width() || frame_->height > video_limit_.height())))
     throw std::runtime_error("视频画面尺寸无效或超出输入限制");
@@ -171,8 +190,10 @@ void TrackDecoder::ConvertVideo(qint64 origin_us, MediaBatch& batch) {
         reinterpret_cast<const uint8_t*>(display_matrix_.constData()), sizeof(values));
     geometry.SetDisplayMatrix(values);
   }
-  batch.video.push_back({std::move(owned), std::max(target_us_, pts),
-                         next_video_us_ - std::max(target_us_, pts), geometry});
+  const qint64 display_pts = tail_preview ? pts : std::max(target_us_, pts);
+  batch.video.push_back({std::move(owned), display_pts, next_video_us_ - display_pts, geometry});
+  delivered_video_ = true;
+  av_frame_unref(seek_frame_.get());
 }
 void TrackDecoder::PrepareAudio() {
   const auto format = static_cast<AVSampleFormat>(frame_->format);

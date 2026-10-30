@@ -79,6 +79,9 @@ class MediaWindow : public QWidget {
   void CreateControls();  // 构造界面与快捷键，并连接用户操作。
   void UpdateRenditions();  // 从服务端源描述生成清晰度选项。
   void ChangeRendition(int index);  // 保留位置和播放意图，重新打开所选媒体列表。
+  void UpdateTracks();
+  void ChangeAudio(int index);
+  void ShowTracks();
   void ConnectDecoder();  // 建立跨线程请求、结果及错误信号连接。
   void StartSeek(qint64 position_us,
                  bool play_after);     // 清 GUI/设备状态并发起定位。
@@ -113,6 +116,10 @@ class MediaWindow : public QWidget {
   QSlider* volume_;           // 0～100 的感知音量滑块。
   QLabel* status_;            // 状态及时间显示。
   QComboBox* quality_;        // HLS 已就绪档位；本地和单文件 HTTP 不显示。
+  QComboBox* audio_tracks_;
+  QLabel* audio_notice_;
+  MediaTracks tracks_;
+  QString audio_failure_;
   MediaDecoder* decoder_;  // 工作线程拥有操作权，由 finished/deleteLater 销毁。
   QThread thread_;         // GUI 线程中的线程管理对象，内部运行解码事件循环。
   QTimer timer_;           // 10ms 唤醒调度，不把 timeout 次数当作播放时间。
